@@ -312,11 +312,16 @@ public final class EmulatorManager: Sendable {
     }
 
     /// Install a local APK file to the given emulator.
+    /// - Parameter userId: restrict the install to one identity; nil installs
+    ///   for all identities (data stays isolated per identity either way).
     @discardableResult
-    public func installAPK(serial: String, path: String,
+    public func installAPK(serial: String, path: String, userId: Int? = nil,
                            onLine: @escaping @Sendable (String, Bool) -> Void) -> Bool {
         onLine("Installing \(URL(fileURLWithPath: path).lastPathComponent)...", false)
-        return Shell.runStreaming([adbPath, "-s", serial, "install", path], onLine: onLine).ok
+        var args = [adbPath, "-s", serial, "install"]
+        if let userId { args += ["--user", "\(userId)"] }
+        args.append(path)
+        return Shell.runStreaming(args, onLine: onLine).ok
     }
 
     // MARK: - Uninstallation / Purging (Clean Uninstall)

@@ -96,7 +96,7 @@ final class AppModel: ObservableObject {
         case sandboxes
         case installer
         case storage
-        case terminal
+        case activity
         case settings
     }
     
@@ -352,7 +352,7 @@ final class AppModel: ObservableObject {
                 await MainActor.run { self.progressMessage = "Uninstalling Android SDK via Homebrew..." }
                 _ = manager.uninstallSdk { line, transient in
                     Task { @MainActor in
-                        self.log("  [SDK] " + line, transient: transient)
+                        self.log("· " + line, transient: transient)
                     }
                 }
             }
@@ -361,7 +361,7 @@ final class AppModel: ObservableObject {
                 await MainActor.run { self.progressMessage = "Uninstalling Java JRE via Homebrew..." }
                 _ = manager.uninstallJava { line, transient in
                     Task { @MainActor in
-                        self.log("  [Java] " + line, transient: transient)
+                        self.log("· " + line, transient: transient)
                     }
                 }
             }
@@ -400,7 +400,7 @@ final class AppModel: ObservableObject {
                 await MainActor.run { self.progressMessage = "Installing Java (Temurin)..." }
                 _ = manager.installJava { line, transient in
                     Task { @MainActor in
-                        self.log("  [Java] " + line, transient: transient)
+                        self.log("· " + line, transient: transient)
                     }
                 }
             }
@@ -409,7 +409,7 @@ final class AppModel: ObservableObject {
                 await MainActor.run { self.progressMessage = "Installing Android SDK command-line tools..." }
                 _ = manager.installSdk { line, transient in
                     Task { @MainActor in
-                        self.log("  [SDK] " + line, transient: transient)
+                        self.log("· " + line, transient: transient)
                     }
                 }
             }
@@ -882,9 +882,9 @@ struct ContentView: View {
                                         model.activeApp = .storage
                                     }
                                 }
-                                desktopAppIcon(title: "Terminal", icon: "terminal") {
+                                desktopAppIcon(title: "Activity", icon: "list.bullet.rectangle") {
                                     withAnimation(.easeIn(duration: 0.15)) {
-                                        model.activeApp = .terminal
+                                        model.activeApp = .activity
                                     }
                                 }
                                 desktopAppIcon(title: "Settings", icon: "gearshape") {
@@ -999,14 +999,14 @@ struct ContentView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 260)
                 
-                Picker("System Type", selection: $model.newType) {
-                    Text("Google Play Edition").tag(1)
-                    Text("Open-Source AOSP + Aurora").tag(2)
-                    Text("Blank AOSP Sandbox").tag(3)
+                Picker("System", selection: $model.newType) {
+                    Text("Google Play — Play Store built in").tag(1)
+                    Text("Open source — apps via Aurora Store").tag(2)
+                    Text("Blank — install apps yourself").tag(3)
                 }
                 .frame(width: 260)
-                
-                Picker("Device Layout / Size", selection: $model.newProfile) {
+
+                Picker("Size", selection: $model.newProfile) {
                     Text("Phone (Portrait)").tag(1)
                     Text("Phone (Landscape)").tag(2)
                     Text("Tablet (Portrait)").tag(3)
@@ -1042,7 +1042,7 @@ struct ContentView: View {
         case .sandboxes: return "Sandboxes"
         case .installer: return "Installer"
         case .storage: return "Storage"
-        case .terminal: return "Terminal"
+        case .activity: return "Activity"
         case .settings: return "Settings"
         }
     }
@@ -1058,8 +1058,8 @@ struct ContentView: View {
             InstallerAppView(model: model)
         case .storage:
             StorageAppView(model: model)
-        case .terminal:
-            TerminalAppView(model: model)
+        case .activity:
+            ActivityAppView(model: model)
         case .settings:
             SettingsAppView(model: model)
         }
@@ -1133,7 +1133,7 @@ struct DevicesAppView: View {
     var body: some View {
         VStack(spacing: 16) {
             HStack {
-                Text("Configured Virtual Phones")
+                Text("Your Virtual Phones")
                     .font(.subheadline).bold()
                 Spacer()
                 Button {
@@ -1148,10 +1148,10 @@ struct DevicesAppView: View {
             
             if model.avds.isEmpty {
                 VStack(spacing: 8) {
-                    Text("No virtual phones created.")
+                    Text("No virtual phones yet.")
                         .font(.caption)
                         .foregroundStyle(Color.slateTextDim)
-                    Text("Please click Add to create your first layout virtual device.")
+                    Text("Click Add to create your first one — andross fetches everything it needs.")
                         .font(.system(size: 10))
                         .foregroundStyle(Color.slateTextDim)
                 }
@@ -1236,7 +1236,7 @@ struct SandboxesAppView: View {
             }
             
             if model.identities.isEmpty {
-                Text("Virtual phone must be active to manage sandboxes. Please launch the phone first.")
+                Text("Identities live inside a running phone.\nLaunch one from Devices first.")
                     .font(.caption)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(Color.slateTextDim)
@@ -1263,7 +1263,7 @@ struct SandboxesAppView: View {
                         if !model.ownerPackages.isEmpty && user.userId != 0 {
                             Menu {
                                 ForEach(model.ownerPackages, id: \.self) { pkg in
-                                    Button(pkg) {
+                                    Button(AppCatalog.displayName(for: pkg)) {
                                         model.cloneApp(packageName: pkg, toUser: user.userId)
                                     }
                                 }
@@ -1272,7 +1272,7 @@ struct SandboxesAppView: View {
                             }
                             .menuStyle(.borderlessButton)
                             .fixedSize()
-                            .help("Clone an installed app into this identity")
+                            .help("Add an installed app to this identity")
                         }
 
                         if user.userId == model.activeIdentityId {
@@ -1311,7 +1311,7 @@ struct SandboxesAppView: View {
                     Text("Add New Identity")
                         .font(.caption).bold()
                     HStack(spacing: 8) {
-                        TextField("Sandbox name (e.g. line-work)", text: $newIdentityName)
+                        TextField("Name (e.g. work, creator)", text: $newIdentityName)
                             .textFieldStyle(.roundedBorder)
                         
                         Button {
@@ -1337,14 +1337,14 @@ struct InstallerAppView: View {
     
     var body: some View {
         VStack(spacing: 16) {
-            Text("APK Drag and Drop Installer")
+            Text("Install an App")
                 .font(.subheadline).bold()
-            
+
             VStack(spacing: 12) {
                 Image(systemName: "square.and.arrow.down")
                     .font(.system(size: 32))
                     .foregroundStyle(model.isDragging ? Color.androidGreen : Color.slateTextDim)
-                Text("Drop package .apk file here to deploy")
+                Text("Drop an .apk file here to install it on the running phone")
                     .font(.caption)
                     .foregroundStyle(model.isDragging ? Color.androidGreen : Color.slateTextDim)
             }
@@ -1374,7 +1374,7 @@ struct InstallerAppView: View {
                             Task.detached(priority: .userInitiated) {
                                 let ok = EmulatorManager.shared.installAPK(serial: serial, path: url.path) { line, transient in
                                     Task { @MainActor in
-                                        model.log("  [ADB] " + line, transient: transient)
+                                        model.log("· " + line, transient: transient)
                                     }
                                 }
                                 await MainActor.run {
@@ -1461,34 +1461,43 @@ struct StorageAppView: View {
                     } else {
                         ForEach(model.appStorageStats, id: \.packageName) { app in
                             VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Text(app.packageName)
+                                HStack(alignment: .firstTextBaseline) {
+                                    Text(AppCatalog.displayName(for: app.packageName))
                                         .font(.caption2).bold()
                                         .foregroundStyle(Color.androidGreen)
+                                    Text(app.packageName)
+                                        .font(.system(size: 8))
+                                        .foregroundStyle(Color.slateTextDim)
                                     Spacer()
-                                    Text("Total: \(ByteCountFormatter.string(fromByteCount: app.totalKnownSize, countStyle: .file))")
+                                    Text(ByteCountFormatter.string(fromByteCount: app.totalKnownSize, countStyle: .file))
                                         .font(.caption2).bold()
                                         .foregroundStyle(Color.white)
                                 }
                                 HStack {
-                                    Text("  • App size (APK):")
+                                    Text("  • App")
                                     Spacer()
                                     Text(ByteCountFormatter.string(fromByteCount: app.apkSize, countStyle: .file))
                                 }
                                 HStack {
-                                    Text("  • User data:")
+                                    Text("  • Data")
                                     Spacer()
-                                    Text(app.dataSize.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "n/a (needs root)")
+                                    Text(app.dataSize.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
                                 }
                                 HStack {
-                                    Text("  • Cache size:")
+                                    Text("  • Cache")
                                     Spacer()
-                                    Text(app.cacheSize.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "n/a (needs root)")
+                                    Text(app.cacheSize.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
                                 }
                             }
                             .font(.system(size: 9))
                             .foregroundStyle(Color.slateTextDim)
                             .padding(.bottom, 2)
+                        }
+
+                        if model.appStorageStats.contains(where: { $0.dataSize == nil }) {
+                            Text("Data sizes aren't readable on Google Play system images.")
+                                .font(.system(size: 8))
+                                .foregroundStyle(Color.slateTextDim.opacity(0.7))
                         }
                     }
                 }
@@ -1499,27 +1508,27 @@ struct StorageAppView: View {
     }
 }
 
-// APP VIEW 5: Terminal app
-struct TerminalAppView: View {
+// APP VIEW 5: Activity app
+struct ActivityAppView: View {
     @ObservedObject var model: AppModel
-    
+
     var body: some View {
         VStack(spacing: 12) {
             HStack {
-                Text("Console Output Logs")
+                Text("Recent Activity")
                     .font(.subheadline).bold()
                 Spacer()
-                Button("Clear Logs") {
+                Button("Clear") {
                     model.clearLogs()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             }
-            
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
                     if model.logs.isEmpty {
-                        Text("No logs captured. Run commands to view stdout streams.")
+                        Text("Nothing here yet — phone and app actions will appear as they happen.")
                             .font(.system(size: 10, design: .monospaced))
                             .foregroundStyle(Color.slateTextDim)
                     } else {
@@ -1547,18 +1556,18 @@ struct SettingsAppView: View {
         VStack(spacing: 20) {
             // Section 1: System Status
             VStack(alignment: .leading, spacing: 12) {
-                Text("System Dependencies")
+                Text("System Status")
                     .font(.caption).bold()
                     .foregroundStyle(Color.white)
-                
+
                 VStack(spacing: 8) {
-                    dependencyRow(name: "Java Runtime", active: model.depStatus.java)
-                    dependencyRow(name: "Android SDK", active: model.depStatus.sdk)
+                    dependencyRow(name: "Java runtime", active: model.depStatus.java)
+                    dependencyRow(name: "Android engine", active: model.depStatus.sdk)
                     dependencyRow(name: "Homebrew", active: model.depStatus.brew)
                 }
                 .padding(10)
                 .liquidGlassBackground(cornerRadius: 8, customBorderColor: Color.white.opacity(0.1))
-                
+
                 if !model.depStatus.java || !model.depStatus.sdk {
                     if model.depStatus.brew {
                         Button {
@@ -1566,7 +1575,7 @@ struct SettingsAppView: View {
                         } label: {
                             HStack {
                                 Spacer()
-                                Label("Auto-Fix Dependencies", systemImage: "wrench.and.screwdriver.fill")
+                                Label("Install Missing Components", systemImage: "wrench.and.screwdriver.fill")
                                     .font(.caption).bold()
                                 Spacer()
                             }
@@ -1575,7 +1584,7 @@ struct SettingsAppView: View {
                         .tint(.androidGreen)
                         .controlSize(.small)
                     } else {
-                        Text("Please install Homebrew on your Mac to auto-fix missing components.")
+                        Text("Homebrew is needed to install the missing components — see brew.sh.")
                             .font(.system(size: 10))
                             .foregroundStyle(Color.slateRed)
                             .multilineTextAlignment(.center)
@@ -1583,26 +1592,26 @@ struct SettingsAppView: View {
                     }
                 }
             }
-            
-            // Section 2: Emulator Controls
+
+            // Section 2: Phones
             VStack(alignment: .leading, spacing: 8) {
-                Text("Emulator Control")
+                Text("Phones")
                     .font(.caption).bold()
                     .foregroundStyle(Color.white)
-                
+
                 Button(role: .destructive) {
-                    model.log("[*] Shutting down active emulators...")
+                    model.log("Shutting down all phones…")
                     Task.detached(priority: .userInitiated) {
                         let count = EmulatorManager.shared.stopAll()
                         await MainActor.run {
-                            model.log(count > 0 ? "Stopped \(count) emulator(s)." : "No running emulators detected.")
+                            model.log(count > 0 ? "Stopped \(count) phone(s)." : "No phone is running.")
                             model.refreshIdentities()
                         }
                     }
                 } label: {
                     HStack {
                         Spacer()
-                        Label("Stop All Active Emulators", systemImage: "stop.circle.fill")
+                        Label("Shut Down All Phones", systemImage: "stop.circle.fill")
                             .font(.caption).bold()
                         Spacer()
                     }
@@ -1611,18 +1620,18 @@ struct SettingsAppView: View {
                 .tint(.slateRed)
                 .controlSize(.small)
             }
-            
-            // Section 3: Clean Maintenance & Purge
+
+            // Section 3: Clean uninstall
             VStack(alignment: .leading, spacing: 10) {
-                Text("Maintenance & Clean Uninstall")
+                Text("Uninstall")
                     .font(.caption).bold()
                     .foregroundStyle(Color.white)
-                
+
                 VStack(alignment: .leading, spacing: 8) {
-                    Toggle("Delete AVD virtual config directory (~/.android)", isOn: $model.uninstallDeleteAVDs)
-                    Toggle("Uninstall Android SDK tools via brew", isOn: $model.uninstallSdk)
-                    Toggle("Uninstall Java Environment via brew", isOn: $model.uninstallJava)
-                    Toggle("Remove local cache temporary files (~/.andross_tmp)", isOn: $model.uninstallTemp)
+                    Toggle("Delete all virtual phones and their data (~/.android)", isOn: $model.uninstallDeleteAVDs)
+                    Toggle("Remove the Android engine (Homebrew)", isOn: $model.uninstallSdk)
+                    Toggle("Remove the Java runtime (Homebrew)", isOn: $model.uninstallJava)
+                    Toggle("Delete temporary files (~/.andross_tmp)", isOn: $model.uninstallTemp)
                 }
                 .font(.caption2)
                 .foregroundStyle(Color.slateTextDim)
@@ -1644,7 +1653,7 @@ struct SettingsAppView: View {
                 } label: {
                     HStack {
                         Spacer()
-                        Label("Perform Clean Uninstall", systemImage: "trash.fill")
+                        Label("Uninstall and Clean Up…", systemImage: "trash.fill")
                             .font(.caption).bold()
                         Spacer()
                     }
@@ -1664,8 +1673,8 @@ struct SettingsAppView: View {
                 .font(.caption2)
                 .foregroundStyle(Color.white.opacity(0.9))
             Spacer()
-            Text(active ? "Installed" : "Missing")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+            Text(active ? "Ready" : "Not installed")
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(active ? Color.androidGreen : Color.slateRed)
         }
     }

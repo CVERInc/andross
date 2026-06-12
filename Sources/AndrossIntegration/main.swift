@@ -70,11 +70,17 @@ guard running.contains(where: { $0.serial == serial && $0.avdName == avd }) else
 }
 pass("runningAVDs maps \(serial) → \(avd)")
 
-// 3. User listing
-let usersBefore = manager.listUsers(serial: serial)
+// 3. User listing (+ clean up leftovers from earlier aborted runs)
+var usersBefore = manager.listUsers(serial: serial)
 guard usersBefore.contains(where: { $0.userId == 0 }) else {
     fail("owner user (0) not found in: \(usersBefore)")
 }
+for leftover in usersBefore where leftover.name == "andross-it" {
+    if manager.deleteUser(serial: serial, id: leftover.userId) {
+        print("… removed leftover test identity \(leftover.userId) from an earlier run")
+    }
+}
+usersBefore = manager.listUsers(serial: serial)
 pass("listUsers: \(usersBefore.map { "\($0.userId):\($0.name)" }.joined(separator: ", "))")
 
 // 4. Create identity
@@ -97,6 +103,19 @@ guard waitFor("foreground user == \(newId)", timeoutSeconds: 60,
     fail("foreground user never became \(newId)")
 }
 pass("switched foreground to identity \(newId)")
+
+// 5b. Optional: install a real APK (owner-only) to exercise the install and
+// clone paths end-to-end. Set ANDROSS_IT_APK=/path/to/test.apk to enable.
+if let apkPath = ProcessInfo.processInfo.environment["ANDROSS_IT_APK"] {
+    guard FileManager.default.fileExists(atPath: apkPath) else {
+        fail("ANDROSS_IT_APK set but file missing: \(apkPath)")
+    }
+    guard manager.installAPK(serial: serial, path: apkPath, userId: 0,
+                             onLine: { line, _ in print("  · \(line)") }) else {
+        fail("installAPK failed for \(apkPath)")
+    }
+    pass("installed test APK for owner only")
+}
 
 // 6. Package listing + clone (only if a third-party app exists on owner)
 let ownerPackages = manager.listThirdPartyPackages(serial: serial, userId: 0)
@@ -123,10 +142,8 @@ if let pkg = ownerPackages.first {
     print("… no third-party app on owner; clone/storage steps skipped (fresh image)")
 }
 
-// 7. Switch back and delete the test identity
-_ = manager.switchUser(serial: serial, id: 0)
-_ = waitFor("foreground user == 0", timeoutSeconds: 60,
-            condition: { manager.currentUserId(serial: serial) == 0 })
+// 7. Delete the test identity while it is still in the foreground —
+// exercises deleteUser's switch-away-first safety path.
 guard manager.deleteUser(serial: serial, id: newId) else {
     fail("deleteUser(\(newId)) failed")
 }
@@ -141,6 +158,15 @@ guard manager.deleteUser(serial: serial, id: 0) == false else {
     fail("deleteUser(0) must be refused")
 }
 pass("owner deletion correctly refused")
+
+// 8b. Remove the test APK again if we installed one.
+if ProcessInfo.processInfo.environment["ANDROSS_IT_APK"] != nil,
+   let pkg = ProcessInfo.processInfo.environment["ANDROSS_IT_APK_PKG"] {
+    guard manager.uninstallPackage(serial: serial, packageName: pkg) else {
+        fail("uninstallPackage(\(pkg)) failed")
+    }
+    pass("test APK \(pkg) uninstalled")
+}
 
 // 9. Shutdown
 let stopped = manager.stopAll()

@@ -16,8 +16,9 @@ swift build -c "$CONFIG" --product AndrossApp
 BIN=".build/$CONFIG/AndrossApp"
 
 rm -rf "$DEST"
-mkdir -p "$DEST/Contents/MacOS"
+mkdir -p "$DEST/Contents/MacOS" "$DEST/Contents/Resources"
 cp "$BIN" "$DEST/Contents/MacOS/AndrossApp"
+cp assets/andross.icns "$DEST/Contents/Resources/andross.icns"
 
 cat > "$DEST/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -29,7 +30,8 @@ cat > "$DEST/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>net.cver.andross</string>
   <key>CFBundleExecutable</key><string>AndrossApp</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.0.1</string>
+  <key>CFBundleIconFile</key><string>andross</string>
+  <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>

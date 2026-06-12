@@ -52,9 +52,22 @@ extension EmulatorManager {
     }
 
     /// Remove the specified identity sandbox and its data.
+    ///
+    /// Android refuses to remove the foreground user, so if the target is
+    /// currently in front we switch back to the owner first and wait for the
+    /// switch to land (freshly-provisioned identities can take a while).
     @discardableResult
     public func deleteUser(serial: String, id: Int) -> Bool {
         guard id != 0 else { return false } // user 0 is the system owner
+
+        if currentUserId(serial: serial) == id {
+            let deadline = Date().addingTimeInterval(120)
+            while Date() < deadline, currentUserId(serial: serial) != 0 {
+                adb(serial, ["shell", "am", "switch-user", "0"])
+                Thread.sleep(forTimeInterval: 2)
+            }
+            guard currentUserId(serial: serial) == 0 else { return false }
+        }
         return adb(serial, ["shell", "pm", "remove-user", "\(id)"]).ok
     }
 
@@ -63,6 +76,12 @@ extension EmulatorManager {
     @discardableResult
     public func cloneApp(serial: String, packageName: String, toUser userId: Int) -> Bool {
         adb(serial, ["shell", "pm", "install-existing", "--user", "\(userId)", packageName]).ok
+    }
+
+    /// Fully uninstall a package from the device (all identities).
+    @discardableResult
+    public func uninstallPackage(serial: String, packageName: String) -> Bool {
+        adb(serial, ["uninstall", packageName]).ok
     }
 
     /// List third-party (user-installed) packages visible to the given identity.
