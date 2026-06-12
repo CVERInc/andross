@@ -337,6 +337,31 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Dock power button: boots the selected phone when everything is off,
+    /// shuts everything down when a phone is running.
+    func togglePower() {
+        if activeSerial != nil {
+            log("Shutting down all phones…")
+            Task.detached(priority: .userInitiated) {
+                let count = EmulatorManager.shared.stopAll()
+                await MainActor.run {
+                    self.log(count > 0 ? "Stopped \(count) phone(s)." : "No phone is running.")
+                    self.refreshIdentities()
+                }
+            }
+        } else if let name = selectedAVD ?? avds.first {
+            log("Booting \(name)…")
+            if EmulatorManager.shared.startAVD(name: name) {
+                log("Boot started — your apps will appear once the phone is up.")
+            } else {
+                log("Boot failed: the engine isn't installed yet — create a device first.")
+            }
+        } else {
+            // Nothing to boot yet — guide to device creation.
+            activeApp = .devices
+        }
+    }
+
     func launchApp(packageName: String) {
         guard let serial = activeSerial else { return }
         log("Opening \(AppCatalog.displayName(for: packageName)) on \(activeDeviceName)…")
@@ -836,6 +861,7 @@ struct ContentView: View {
     @State private var showCreateSheet = false
     @State private var showSizesMenu = false
     @State private var hoverTask: Task<Void, Never>? = nil
+    @State private var dockHovering = false
     var body: some View {
         ZStack {
             VStack(spacing: 0) {
@@ -936,15 +962,22 @@ struct ContentView: View {
                                 Spacer()
                             }
 
-                            // Dock: the three system surfaces.
-                            HStack(spacing: model.isLandscape ? 48 : 36) {
-                                dockIcon(title: "Devices", icon: "iphone") {
+                            // Dock: power + the three system surfaces.
+                            // Labels stay hidden until the pointer enters the dock.
+                            HStack(spacing: model.isLandscape ? 44 : 30) {
+                                dockIcon(title: model.activeSerial != nil ? "Power Off" : "Power On",
+                                         icon: "power",
+                                         tint: model.activeSerial != nil ? .androidGreen : .slateTextDim,
+                                         showLabel: dockHovering) {
+                                    model.togglePower()
+                                }
+                                dockIcon(title: "Devices", icon: "iphone", showLabel: dockHovering) {
                                     withAnimation(.easeIn(duration: 0.15)) { model.activeApp = .devices }
                                 }
-                                dockIcon(title: "Sandboxes", icon: "person.2") {
+                                dockIcon(title: "Sandboxes", icon: "person.2", showLabel: dockHovering) {
                                     withAnimation(.easeIn(duration: 0.15)) { model.activeApp = .sandboxes }
                                 }
-                                dockIcon(title: "Settings", icon: "gearshape") {
+                                dockIcon(title: "Settings", icon: "gearshape", showLabel: dockHovering) {
                                     withAnimation(.easeIn(duration: 0.15)) { model.activeApp = .settings }
                                 }
                             }
@@ -953,6 +986,11 @@ struct ContentView: View {
                             .liquidGlassBackground(cornerRadius: 22)
                             .padding(.bottom, 8)
                             .padding(.top, 6)
+                            .onHover { hovering in
+                                withAnimation(.easeOut(duration: 0.16)) {
+                                    dockHovering = hovering
+                                }
+                            }
                         }
                         .background(Color.clear)
                     }
@@ -1201,23 +1239,28 @@ struct ContentView: View {
         }
     }
     
-    /// Dock icon for the three system surfaces.
-    private func dockIcon(title: String, icon: String, action: @escaping () -> Void) -> some View {
+    /// Dock icon. Labels are hidden until the pointer hovers over the dock.
+    private func dockIcon(title: String, icon: String, tint: Color = .androidGreen,
+                          showLabel: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             VStack(spacing: 6) {
                 Image(systemName: icon)
                     .font(.system(size: 20))
-                    .foregroundStyle(Color.androidGreen)
+                    .foregroundStyle(tint)
                     .frame(width: 44, height: 44)
                     .background(Color.white.opacity(0.06))
                     .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
 
-                Text(title)
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.8))
+                if showLabel {
+                    Text(title)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.8))
+                        .transition(.opacity)
+                }
             }
         }
         .buttonStyle(.plain)
+        .help(title)
         .accessibilityLabel(title)
     }
 
