@@ -6,6 +6,7 @@ public enum AppCatalog {
     private static let known: [String: String] = [
         "jp.naver.line.android": "LINE",
         "com.aurora.store": "Aurora Store",
+        "org.fdroid.fdroid": "F-Droid",
         "com.android.chrome": "Chrome",
         "com.whatsapp": "WhatsApp",
         "org.telegram.messenger": "Telegram",

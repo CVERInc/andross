@@ -78,6 +78,15 @@ extension EmulatorManager {
         adb(serial, ["shell", "pm", "install-existing", "--user", "\(userId)", packageName]).ok
     }
 
+    /// Launch an app on the device for the current foreground identity.
+    /// Uses monkey with the LAUNCHER category so we don't need to know the
+    /// app's main activity name.
+    @discardableResult
+    public func launchApp(serial: String, packageName: String) -> Bool {
+        adb(serial, ["shell", "monkey", "-p", packageName,
+                     "-c", "android.intent.category.LAUNCHER", "1"]).ok
+    }
+
     /// Fully uninstall a package from the device (all identities).
     @discardableResult
     public func uninstallPackage(serial: String, packageName: String) -> Bool {

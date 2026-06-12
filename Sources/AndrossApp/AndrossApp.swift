@@ -70,6 +70,7 @@ final class AppModel: ObservableObject {
     @Published var activeDeviceName = ""
     @Published var activeSerial: String? = nil
     @Published var ownerPackages: [String] = []
+    @Published var activePackages: [String] = []
     @Published var runningAVDNames: Set<String> = []
     
     // Storage statistics
@@ -90,13 +91,11 @@ final class AppModel: ObservableObject {
     @Published var uninstallJava = false
     @Published var uninstallTemp = true
     
-    // Desktop layout state
+    // Desktop layout state — system surfaces live in the dock; the home
+    // grid belongs to the user's own Android apps.
     enum ActiveApp: String, CaseIterable, Sendable {
         case devices
         case sandboxes
-        case installer
-        case storage
-        case activity
         case settings
     }
     
@@ -123,11 +122,24 @@ final class AppModel: ObservableObject {
     }
     
     private var lastLineIsTransient = false
-    
+    private var refreshTimer: Timer?
+
     init() {
         refreshAVDs()
         checkDependencies()
         refreshStorageStats()
+
+        // Keep the home screen in sync with reality: a phone booted from
+        // here takes a minute to come up, and one stopped from inside the
+        // phone window disappears — poll cheaply instead of going stale.
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 6, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshIdentities()
+            }
+        }
+        // Note: no deinit invalidation — AppModel is the root StateObject and
+        // lives for the app's lifetime; the weak self keeps the timer inert
+        // if that ever changes.
     }
     
     func refreshAVDs() {
@@ -238,20 +250,33 @@ final class AppModel: ObservableObject {
             var users: [EmulatorManager.AndroidUser] = []
             var currentId = 0
             var packages: [String] = []
+            var currentPackages: [String] = []
             if let serial {
                 users = manager.listUsers(serial: serial)
                 currentId = manager.currentUserId(serial: serial)
                 packages = manager.listThirdPartyPackages(serial: serial, userId: 0)
+                currentPackages = currentId == 0
+                    ? packages
+                    : manager.listThirdPartyPackages(serial: serial, userId: currentId)
             }
 
             await MainActor.run {
+                // Only re-run the (du-heavy) storage scan when the device
+                // state actually changed — this runs on a 6s poll.
+                let changed = self.activeSerial != serial
+                    || self.activeIdentityId != currentId
+                    || self.activePackages != currentPackages
+
                 self.activeSerial = serial
                 self.identities = users
                 self.activeIdentityId = currentId
                 self.ownerPackages = packages
+                self.activePackages = currentPackages
                 self.activeDeviceName = running.first?.avdName ?? ""
                 self.runningAVDNames = Set(running.map { $0.avdName })
-                self.refreshStorageStats()
+                if changed {
+                    self.refreshStorageStats()
+                }
             }
         }
     }
@@ -308,6 +333,40 @@ final class AppModel: ObservableObject {
                 } else {
                     self.log("Failed to remove identity.")
                 }
+            }
+        }
+    }
+
+    func launchApp(packageName: String) {
+        guard let serial = activeSerial else { return }
+        log("Opening \(AppCatalog.displayName(for: packageName)) on \(activeDeviceName)…")
+        Task.detached(priority: .userInitiated) {
+            let ok = EmulatorManager.shared.launchApp(serial: serial, packageName: packageName)
+            if !ok {
+                await MainActor.run {
+                    self.log("Couldn't open \(AppCatalog.displayName(for: packageName)).")
+                }
+            }
+        }
+    }
+
+    func installAPK(at url: URL) {
+        guard let serial = activeSerial else {
+            log("No running phone — launch a virtual device before installing.")
+            return
+        }
+        let apkSize = EmulatorManager.shared.getFileSize(path: url.path)
+        let sizeStr = ByteCountFormatter.string(fromByteCount: apkSize, countStyle: .file)
+        log("Installing \(url.lastPathComponent) (\(sizeStr))…")
+        Task.detached(priority: .userInitiated) {
+            let ok = EmulatorManager.shared.installAPK(serial: serial, path: url.path) { line, transient in
+                Task { @MainActor in
+                    self.log("· " + line, transient: transient)
+                }
+            }
+            await MainActor.run {
+                self.log(ok ? "\(url.lastPathComponent) installed." : "Installation of \(url.lastPathComponent) failed.")
+                self.refreshIdentities()
             }
         }
     }
@@ -784,44 +843,10 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     // Unified Header Bar (Transparent background + thin divider line)
                     HStack {
-                        // Left: Custom Traffic Lights (Shown directly)
-                        HStack(spacing: 8) {
-                            Circle()
-                                .fill(Color.slateRed)
-                                .frame(width: 12, height: 12)
-                                .onTapGesture { NSApp.terminate(nil) }
-                            Circle()
-                                .fill(Color(hex: 0xFFBD2E))
-                                .frame(width: 12, height: 12)
-                                .onTapGesture { NSApp.keyWindow?.miniaturize(nil) }
-                            
-                            // Green: Fullscreen toggle on click, Preset sizes popover on hover
-                            Circle()
-                                .fill(Color.androidGreen)
-                                .frame(width: 12, height: 12)
-                                .onTapGesture {
-                                    NotificationCenter.default.post(name: NSNotification.Name("ToggleMaximize"), object: nil)
-                                }
-                                .onHover { hovering in
-                                    if hovering {
-                                        hoverTask?.cancel()
-                                        withAnimation(.easeOut(duration: 0.15)) {
-                                            showSizesMenu = true
-                                        }
-                                    } else {
-                                        hoverTask = Task {
-                                            try? await Task.sleep(nanoseconds: 300_000_000) // 300ms delay
-                                            if !Task.isCancelled {
-                                                withAnimation(.easeIn(duration: 0.15)) {
-                                                    showSizesMenu = false
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                        }
-                        .frame(width: 60, alignment: .leading)
-                        
+                        // Left: spacer balancing the fixed traffic-light overlay
+                        Color.clear
+                            .frame(width: 60, height: 12)
+
                         Spacer()
                         
                         // Center: Page Title
@@ -857,66 +882,100 @@ struct ContentView: View {
                         }
                         .background(Color.clear)
                     } else {
-                        // Desktop home launcher grid centered vertically
+                        // Home: the user's own Android apps, like a real phone.
                         VStack(spacing: 0) {
-                            Spacer()
-                            
-                            LazyVGrid(columns: Array(repeating: GridItem(.fixed(100), spacing: 20), count: model.isLandscape ? 5 : 3), spacing: 24) {
-                                desktopAppIcon(title: "Devices", icon: "iphone") {
-                                    withAnimation(.easeIn(duration: 0.15)) {
-                                        model.activeApp = .devices
+                            if model.activeSerial != nil {
+                                // Status chip: which phone / which identity
+                                let identityName = model.identities.first { $0.userId == model.activeIdentityId }?.name ?? "Owner"
+                                Text("\(model.activeDeviceName) · \(identityName)")
+                                    .font(.caption2)
+                                    .foregroundStyle(Color.slateTextDim)
+                                    .padding(.top, 10)
+
+                                if model.activePackages.isEmpty {
+                                    Spacer()
+                                    VStack(spacing: 10) {
+                                        Image(systemName: "square.and.arrow.down")
+                                            .font(.system(size: 28))
+                                            .foregroundStyle(Color.slateTextDim)
+                                        Text("No apps yet.")
+                                            .font(.caption)
+                                            .foregroundStyle(Color.slateTextDim)
+                                        Text("Drop an .apk file anywhere in this window,\nor install from the store inside the phone.")
+                                            .font(.system(size: 10))
+                                            .multilineTextAlignment(.center)
+                                            .foregroundStyle(Color.slateTextDim.opacity(0.8))
+                                    }
+                                    Spacer()
+                                } else {
+                                    ScrollView {
+                                        LazyVGrid(columns: Array(repeating: GridItem(.fixed(86), spacing: 18), count: model.isLandscape ? 6 : 3), spacing: 20) {
+                                            ForEach(model.activePackages, id: \.self) { pkg in
+                                                androidAppIcon(packageName: pkg) {
+                                                    model.launchApp(packageName: pkg)
+                                                }
+                                            }
+                                        }
+                                        .padding(.horizontal, 20)
+                                        .padding(.top, 18)
                                     }
                                 }
-                                desktopAppIcon(title: "Sandboxes", icon: "person.2") {
-                                    withAnimation(.easeIn(duration: 0.15)) {
-                                        model.activeApp = .sandboxes
-                                    }
+                            } else {
+                                Spacer()
+                                VStack(spacing: 10) {
+                                    Image(systemName: "iphone.slash")
+                                        .font(.system(size: 28))
+                                        .foregroundStyle(Color.slateTextDim)
+                                    Text("No phone is running.")
+                                        .font(.caption)
+                                        .foregroundStyle(Color.slateTextDim)
+                                    Text("Your apps will appear here once a phone is on.")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(Color.slateTextDim.opacity(0.8))
                                 }
-                                desktopAppIcon(title: "Installer", icon: "square.and.arrow.down") {
-                                    withAnimation(.easeIn(duration: 0.15)) {
-                                        model.activeApp = .installer
-                                    }
+                                Spacer()
+                            }
+
+                            // Dock: the three system surfaces.
+                            HStack(spacing: model.isLandscape ? 48 : 36) {
+                                dockIcon(title: "Devices", icon: "iphone") {
+                                    withAnimation(.easeIn(duration: 0.15)) { model.activeApp = .devices }
                                 }
-                                desktopAppIcon(title: "Storage", icon: "sdcard") {
-                                    withAnimation(.easeIn(duration: 0.15)) {
-                                        model.activeApp = .storage
-                                    }
+                                dockIcon(title: "Sandboxes", icon: "person.2") {
+                                    withAnimation(.easeIn(duration: 0.15)) { model.activeApp = .sandboxes }
                                 }
-                                desktopAppIcon(title: "Activity", icon: "list.bullet.rectangle") {
-                                    withAnimation(.easeIn(duration: 0.15)) {
-                                        model.activeApp = .activity
-                                    }
-                                }
-                                desktopAppIcon(title: "Settings", icon: "gearshape") {
-                                    withAnimation(.easeIn(duration: 0.15)) {
-                                        model.activeApp = .settings
-                                    }
+                                dockIcon(title: "Settings", icon: "gearshape") {
+                                    withAnimation(.easeIn(duration: 0.15)) { model.activeApp = .settings }
                                 }
                             }
-                            .padding(.horizontal, 24)
-                            
-                            Spacer()
+                            .padding(.vertical, 12)
+                            .padding(.horizontal, 22)
+                            .liquidGlassBackground(cornerRadius: 22)
+                            .padding(.bottom, 8)
+                            .padding(.top, 6)
                         }
                         .background(Color.clear)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 
-                // Bottom Android Gesture Navigation Bar Pill
-                Color.clear
-                    .frame(height: 24)
-                    .overlay(
-                        Capsule()
-                            .fill(Color.white.opacity(0.35))
-                            .frame(width: 80, height: 4)
-                    )
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        withAnimation(.easeOut(duration: 0.15)) {
-                            model.activeApp = nil
-                        }
+                // Bottom Android Gesture Navigation Bar Pill — a real Button so
+                // it always wins hit-testing against window-background dragging.
+                Button {
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        model.activeApp = nil
                     }
-                    .padding(.bottom, 12)
+                } label: {
+                    Capsule()
+                        .fill(Color.white.opacity(0.35))
+                        .frame(width: 80, height: 4)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 36)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Home")
+                .help("Back to home screen")
             }
             .frame(width: model.currentWidth, height: model.currentHeight)
             .background(Color.slateDeep.opacity(0.2))
@@ -990,6 +1049,48 @@ struct ContentView: View {
                 .background(Color.black.opacity(0.65))
             }
         }
+        // The whole window is an APK drop target, on every screen.
+        .onDrop(of: [.fileURL], isTargeted: $model.isDragging) { providers in
+            guard let provider = providers.first else { return false }
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                Task { @MainActor in
+                    if let url, url.pathExtension.lowercased() == "apk" {
+                        model.installAPK(at: url)
+                    } else {
+                        model.log("That file isn't an Android .apk package.")
+                    }
+                }
+            }
+            return true
+        }
+        .overlay {
+            if model.isDragging {
+                VStack(spacing: 12) {
+                    Image(systemName: "square.and.arrow.down")
+                        .font(.system(size: 36))
+                        .foregroundStyle(Color.androidGreen)
+                    Text("Drop to install")
+                        .font(.subheadline).bold()
+                        .foregroundStyle(Color.androidGreen)
+                }
+                .frame(width: model.currentWidth - 24, height: model.currentHeight - 24)
+                .background(Color.slateDeep.opacity(0.72))
+                .clipShape(RoundedRectangle(cornerRadius: 44, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 44, style: .continuous)
+                        .stroke(Color.androidGreen, style: StrokeStyle(lineWidth: 2, dash: [6]))
+                )
+                .allowsHitTesting(false)
+            }
+        }
+        // Traffic lights pinned to the window's top-left corner, outside the
+        // animating layout (they used to drift during size-change springs).
+        .overlay(alignment: .topLeading) {
+            trafficLights
+                .padding(.leading, 36)
+                .padding(.top, 34)
+                .transaction { $0.animation = nil }
+        }
         // Create Device Sheet
         .sheet(isPresented: $showCreateSheet) {
             VStack(spacing: 16) {
@@ -1036,13 +1137,54 @@ struct ContentView: View {
         .background(Color.clear)
     }
     
+    // Custom traffic lights: real Buttons (not tap gestures) so they always
+    // win hit-testing against window-background dragging.
+    private var trafficLights: some View {
+        HStack(spacing: 8) {
+            Button { NSApp.terminate(nil) } label: {
+                Circle().fill(Color.slateRed).frame(width: 12, height: 12)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close")
+
+            Button { NSApp.keyWindow?.miniaturize(nil) } label: {
+                Circle().fill(Color(hex: 0xFFBD2E)).frame(width: 12, height: 12)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Minimize")
+
+            // Green: fullscreen toggle on click, preset sizes on hover
+            Button {
+                NotificationCenter.default.post(name: NSNotification.Name("ToggleMaximize"), object: nil)
+            } label: {
+                Circle().fill(Color.androidGreen).frame(width: 12, height: 12)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Zoom")
+            .onHover { hovering in
+                if hovering {
+                    hoverTask?.cancel()
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        showSizesMenu = true
+                    }
+                } else {
+                    hoverTask = Task {
+                        try? await Task.sleep(nanoseconds: 300_000_000) // 300ms delay
+                        if !Task.isCancelled {
+                            withAnimation(.easeIn(duration: 0.15)) {
+                                showSizesMenu = false
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private func activeAppTitle(_ app: AppModel.ActiveApp) -> String {
         switch app {
         case .devices: return "Devices"
         case .sandboxes: return "Sandboxes"
-        case .installer: return "Installer"
-        case .storage: return "Storage"
-        case .activity: return "Activity"
         case .settings: return "Settings"
         }
     }
@@ -1054,47 +1196,64 @@ struct ContentView: View {
             DevicesAppView(model: model, showCreateSheet: $showCreateSheet)
         case .sandboxes:
             SandboxesAppView(model: model)
-        case .installer:
-            InstallerAppView(model: model)
-        case .storage:
-            StorageAppView(model: model)
-        case .activity:
-            ActivityAppView(model: model)
         case .settings:
             SettingsAppView(model: model)
         }
     }
     
-    private func desktopAppIcon(title: String, icon: String, action: @escaping () -> Void) -> some View {
+    /// Dock icon for the three system surfaces.
+    private func dockIcon(title: String, icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            VStack(spacing: 8) {
-                ZStack {
-                    Image(systemName: icon)
-                        .font(.system(size: 24))
-                        .foregroundStyle(Color.androidGreen)
-                }
-                .frame(width: 60, height: 60)
-                .background(Color.white.opacity(0.06))
-                .background(.ultraThinMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 13.5, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 13.5, style: .continuous)
-                        .stroke(
-                            LinearGradient(
-                                colors: [Color.white.opacity(0.25), Color.white.opacity(0.05)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: 1
-                        )
-                )
-                
+            VStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 20))
+                    .foregroundStyle(Color.androidGreen)
+                    .frame(width: 44, height: 44)
+                    .background(Color.white.opacity(0.06))
+                    .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+
                 Text(title)
-                    .font(.caption2).bold()
-                    .foregroundStyle(Color.white.opacity(0.85))
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.8))
             }
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(title)
+    }
+
+    private static let avatarPalette: [Color] = [
+        Color(hex: 0x3DDC84), Color(hex: 0x37B9C5), Color(hex: 0x5E9CF2),
+        Color(hex: 0xB387F0), Color(hex: 0xE8A06A), Color(hex: 0xE87C9A),
+    ]
+
+    /// Home-screen icon for an installed Android app: letter avatar tile
+    /// (we can't cheaply extract real icons from APKs) + display name.
+    private func androidAppIcon(packageName: String, action: @escaping () -> Void) -> some View {
+        let name = AppCatalog.displayName(for: packageName)
+        let color = Self.avatarPalette[abs(packageName.hashValue) % Self.avatarPalette.count]
+        return Button(action: action) {
+            VStack(spacing: 7) {
+                Text(String(name.prefix(1)).uppercased())
+                    .font(.system(size: 26, weight: .bold, design: .rounded))
+                    .foregroundStyle(Color.slateDeep)
+                    .frame(width: 58, height: 58)
+                    .background(
+                        LinearGradient(colors: [color, color.opacity(0.72)],
+                                       startPoint: .topLeading, endPoint: .bottomTrailing)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                Text(name)
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .foregroundStyle(Color.white.opacity(0.9))
+                    .frame(maxWidth: 82)
+            }
+        }
+        .buttonStyle(.plain)
+        .help(packageName)
+        .accessibilityLabel(name)
     }
     
     private func sizeMenuButton(title: String, isTablet: Bool, isLandscape: Bool) -> some View {
@@ -1331,223 +1490,6 @@ struct SandboxesAppView: View {
     }
 }
 
-// APP VIEW 3: APK Installer app
-struct InstallerAppView: View {
-    @ObservedObject var model: AppModel
-    
-    var body: some View {
-        VStack(spacing: 16) {
-            Text("Install an App")
-                .font(.subheadline).bold()
-
-            VStack(spacing: 12) {
-                Image(systemName: "square.and.arrow.down")
-                    .font(.system(size: 32))
-                    .foregroundStyle(model.isDragging ? Color.androidGreen : Color.slateTextDim)
-                Text("Drop an .apk file here to install it on the running phone")
-                    .font(.caption)
-                    .foregroundStyle(model.isDragging ? Color.androidGreen : Color.slateTextDim)
-            }
-            .frame(maxWidth: .infinity, minHeight: 160)
-            .background(Color.white.opacity(0.05))
-            .background(.ultraThinMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(
-                        model.isDragging ? Color.androidGreen : Color.white.opacity(0.15),
-                        style: StrokeStyle(lineWidth: 1.5, dash: [4])
-                    )
-            )
-            .onDrop(of: [.fileURL], isTargeted: $model.isDragging) { providers in
-                guard let provider = providers.first else { return false }
-                _ = provider.loadObject(ofClass: URL.self) { url, error in
-                    if let url = url, url.pathExtension.lowercased() == "apk" {
-                        Task { @MainActor in
-                            guard let serial = model.activeSerial else {
-                                model.log("No running phone — launch a virtual device before installing.")
-                                return
-                            }
-                            let apkSize = EmulatorManager.shared.getFileSize(path: url.path)
-                            let sizeStr = ByteCountFormatter.string(fromByteCount: apkSize, countStyle: .file)
-                            model.log("Deploying dropped APK: \(url.lastPathComponent) (\(sizeStr))...")
-                            Task.detached(priority: .userInitiated) {
-                                let ok = EmulatorManager.shared.installAPK(serial: serial, path: url.path) { line, transient in
-                                    Task { @MainActor in
-                                        model.log("· " + line, transient: transient)
-                                    }
-                                }
-                                await MainActor.run {
-                                    model.log(ok ? "APK installation complete." : "APK installation failed.")
-                                    model.refreshStorageStats()
-                                }
-                            }
-                        }
-                    } else {
-                        Task { @MainActor in
-                            model.log("Invalid file type. Please drop a valid Android APK file.")
-                        }
-                    }
-                }
-                return true
-            }
-        }
-    }
-}
-
-// APP VIEW 4: Storage app
-struct StorageAppView: View {
-    @ObservedObject var model: AppModel
-    
-    var body: some View {
-        VStack(spacing: 16) {
-            HStack {
-                Text("Storage Breakdown")
-                    .font(.subheadline).bold()
-                Spacer()
-                Button {
-                    model.refreshStorageStats()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.plain)
-            }
-            
-            let narrow = model.currentWidth < 500
-            
-            let layout = narrow ? AnyLayout(VStackLayout(spacing: 16)) : AnyLayout(HStackLayout(alignment: .top, spacing: 16))
-            
-            layout {
-                // macOS storage
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Mac Host Files")
-                        .font(.caption).bold()
-                        .foregroundStyle(Color.white)
-                    
-                    HStack {
-                        Text("andross App Bundle:")
-                        Spacer()
-                        Text(model.hostAppSize.isEmpty ? "Calculating..." : model.hostAppSize)
-                            .foregroundStyle(Color.white)
-                    }
-                    HStack {
-                        Text("AVD Configs (~/.android):")
-                        Spacer()
-                        Text(model.hostAvdSize.isEmpty ? "Calculating..." : model.hostAvdSize)
-                            .foregroundStyle(Color.white)
-                    }
-                    HStack {
-                        Text("Temp Cache (~/.andross_tmp):")
-                        Spacer()
-                        Text(model.hostTempSize.isEmpty ? "Calculating..." : model.hostTempSize)
-                            .foregroundStyle(Color.white)
-                    }
-                }
-                .font(.caption2)
-                .foregroundStyle(Color.slateTextDim)
-                .padding(10)
-                .liquidGlassBackground(cornerRadius: 8, customBorderColor: Color.white.opacity(0.1))
-                
-                // Android AVD storage
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Android Sandbox Packages")
-                        .font(.caption).bold()
-                        .foregroundStyle(Color.white)
-                    
-                    if model.appStorageStats.isEmpty {
-                        Text("No active app stats found. Please start the virtual phone to inspect storage.")
-                            .font(.system(size: 10))
-                            .foregroundStyle(Color.slateTextDim)
-                    } else {
-                        ForEach(model.appStorageStats, id: \.packageName) { app in
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack(alignment: .firstTextBaseline) {
-                                    Text(AppCatalog.displayName(for: app.packageName))
-                                        .font(.caption2).bold()
-                                        .foregroundStyle(Color.androidGreen)
-                                    Text(app.packageName)
-                                        .font(.system(size: 8))
-                                        .foregroundStyle(Color.slateTextDim)
-                                    Spacer()
-                                    Text(ByteCountFormatter.string(fromByteCount: app.totalKnownSize, countStyle: .file))
-                                        .font(.caption2).bold()
-                                        .foregroundStyle(Color.white)
-                                }
-                                HStack {
-                                    Text("  • App")
-                                    Spacer()
-                                    Text(ByteCountFormatter.string(fromByteCount: app.apkSize, countStyle: .file))
-                                }
-                                HStack {
-                                    Text("  • Data")
-                                    Spacer()
-                                    Text(app.dataSize.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
-                                }
-                                HStack {
-                                    Text("  • Cache")
-                                    Spacer()
-                                    Text(app.cacheSize.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
-                                }
-                            }
-                            .font(.system(size: 9))
-                            .foregroundStyle(Color.slateTextDim)
-                            .padding(.bottom, 2)
-                        }
-
-                        if model.appStorageStats.contains(where: { $0.dataSize == nil }) {
-                            Text("Data sizes aren't readable on Google Play system images.")
-                                .font(.system(size: 8))
-                                .foregroundStyle(Color.slateTextDim.opacity(0.7))
-                        }
-                    }
-                }
-                .padding(10)
-                .liquidGlassBackground(cornerRadius: 8, customBorderColor: Color.white.opacity(0.1))
-            }
-        }
-    }
-}
-
-// APP VIEW 5: Activity app
-struct ActivityAppView: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Text("Recent Activity")
-                    .font(.subheadline).bold()
-                Spacer()
-                Button("Clear") {
-                    model.clearLogs()
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 4) {
-                    if model.logs.isEmpty {
-                        Text("Nothing here yet — phone and app actions will appear as they happen.")
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(Color.slateTextDim)
-                    } else {
-                        ForEach(Array(model.logs.enumerated()), id: \.offset) { _, line in
-                            Text(line)
-                                .font(.system(size: 9, design: .monospaced))
-                                .foregroundStyle(Color.white)
-                        }
-                    }
-                }
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .frame(minHeight: 280)
-            .liquidGlassBackground(cornerRadius: 8, customBorderColor: Color.white.opacity(0.1))
-        }
-    }
-}
-
 // APP VIEW 6: Settings app
 struct SettingsAppView: View {
     @ObservedObject var model: AppModel
@@ -1593,7 +1535,102 @@ struct SettingsAppView: View {
                 }
             }
 
-            // Section 2: Phones
+            // Section 2: Storage
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Storage")
+                        .font(.caption).bold()
+                        .foregroundStyle(Color.white)
+                    Spacer()
+                    Button {
+                        model.refreshStorageStats()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 10))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Refresh storage")
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("andross app")
+                        Spacer()
+                        Text(model.hostAppSize.isEmpty ? "…" : model.hostAppSize).foregroundStyle(Color.white)
+                    }
+                    HStack {
+                        Text("Virtual phones (~/.android)")
+                        Spacer()
+                        Text(model.hostAvdSize.isEmpty ? "…" : model.hostAvdSize).foregroundStyle(Color.white)
+                    }
+                    HStack {
+                        Text("Temporary files (~/.andross_tmp)")
+                        Spacer()
+                        Text(model.hostTempSize.isEmpty ? "…" : model.hostTempSize).foregroundStyle(Color.white)
+                    }
+
+                    if !model.appStorageStats.isEmpty {
+                        Divider().background(Color.white.opacity(0.1))
+                        ForEach(model.appStorageStats, id: \.packageName) { app in
+                            HStack {
+                                Text(AppCatalog.displayName(for: app.packageName))
+                                    .foregroundStyle(Color.androidGreen)
+                                Spacer()
+                                Text(ByteCountFormatter.string(fromByteCount: app.totalKnownSize, countStyle: .file))
+                                    .foregroundStyle(Color.white)
+                            }
+                            .help(app.packageName)
+                        }
+                        if model.appStorageStats.contains(where: { $0.dataSize == nil }) {
+                            Text("App data sizes aren't readable on Google Play system images.")
+                                .font(.system(size: 8))
+                                .foregroundStyle(Color.slateTextDim.opacity(0.7))
+                        }
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(Color.slateTextDim)
+                .padding(10)
+                .liquidGlassBackground(cornerRadius: 8, customBorderColor: Color.white.opacity(0.1))
+            }
+
+            // Section 3: Recent activity
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Recent Activity")
+                        .font(.caption).bold()
+                        .foregroundStyle(Color.white)
+                    Spacer()
+                    if !model.logs.isEmpty {
+                        Button("Clear") { model.clearLogs() }
+                            .buttonStyle(.plain)
+                            .font(.caption2)
+                            .foregroundStyle(Color.slateTextDim)
+                    }
+                }
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 3) {
+                        if model.logs.isEmpty {
+                            Text("Nothing here yet — phone and app actions will appear as they happen.")
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(Color.slateTextDim)
+                        } else {
+                            ForEach(Array(model.logs.enumerated()), id: \.offset) { _, line in
+                                Text(line)
+                                    .font(.system(size: 9, design: .monospaced))
+                                    .foregroundStyle(Color.white.opacity(0.85))
+                            }
+                        }
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(height: 120)
+                .liquidGlassBackground(cornerRadius: 8, customBorderColor: Color.white.opacity(0.1))
+            }
+
+            // Section 4: Phones
             VStack(alignment: .leading, spacing: 8) {
                 Text("Phones")
                     .font(.caption).bold()
@@ -1621,7 +1658,7 @@ struct SettingsAppView: View {
                 .controlSize(.small)
             }
 
-            // Section 3: Clean uninstall
+            // Section 5: Clean uninstall
             VStack(alignment: .leading, spacing: 10) {
                 Text("Uninstall")
                     .font(.caption).bold()
