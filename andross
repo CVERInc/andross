@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -e
+cd "$(dirname "$0")"
+
+# Delegate execution to the Swift andross CLI tool
+swift run -c release andross "$@"
