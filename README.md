@@ -25,11 +25,10 @@
 完成後會在 `~/Applications/andross.app` 產生可雙擊的 App（第一次開啟若被 macOS 警告未簽章，右鍵 → 打開）。
 
 ### 2. 在 App 裡完成所有事
-*   **Devices**：建立第一台虛擬手機（自動檢查並引導安裝 Java 與 Android SDK 依賴）、一鍵啟動／刪除。
-*   **Sandboxes**：建立、切換、刪除隔離身分，App 一鍵克隆到新身分。
-*   **Installer**：把 `.apk` 直接拖進視窗安裝；也可以拖進虛擬手機視窗。
-*   **Storage**：檢視 Mac 端與 Android 端各佔多少空間。
-*   **Settings**：依賴狀態、停止所有模擬器、乾淨解除安裝精靈（含 Homebrew 元件）。
+*   **主畫面**：顯示目前身分已安裝的 App，點一下就在虛擬手機上開啟；把 `.apk` 拖進視窗任何地方即可安裝。
+*   **Devices**（dock）：建立第一台虛擬手機（自動檢查並引導安裝 Java 與 Android 引擎）、一鍵啟動／刪除。
+*   **Sandboxes**（dock）：建立、切換、刪除隔離身分，已安裝的 App 一鍵加進新身分。
+*   **Settings**（dock）：系統狀態、空間占用、最近動態、關閉所有手機、乾淨解除安裝精靈（含 Homebrew 元件）。
 
 ---
 
