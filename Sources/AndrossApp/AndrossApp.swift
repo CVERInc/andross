@@ -97,6 +97,13 @@ final class AppModel: ObservableObject {
         case devices
         case sandboxes
         case settings
+        case screen
+    }
+
+    /// Boot phones without a separate emulator window; the phone lives in
+    /// the embedded Screen view instead (beta).
+    @Published var headlessBoot = UserDefaults.standard.bool(forKey: "headlessBoot") {
+        didSet { UserDefaults.standard.set(headlessBoot, forKey: "headlessBoot") }
     }
     
     @Published var activeApp: ActiveApp? = nil
@@ -351,8 +358,10 @@ final class AppModel: ObservableObject {
             }
         } else if let name = selectedAVD ?? avds.first {
             log("Booting \(name)…")
-            if EmulatorManager.shared.startAVD(name: name) {
-                log("Boot started — your apps will appear once the phone is up.")
+            if EmulatorManager.shared.startAVD(name: name, headless: headlessBoot) {
+                log(headlessBoot
+                    ? "Boot started — the phone will live in the Screen view."
+                    : "Boot started — your apps will appear once the phone is up.")
             } else {
                 log("Boot failed: the engine isn't installed yet — create a device first.")
             }
@@ -372,6 +381,10 @@ final class AppModel: ObservableObject {
                     self.log("Couldn't open \(AppCatalog.displayName(for: packageName)).")
                 }
             }
+        }
+        // With no separate emulator window, follow the app onto the screen.
+        if headlessBoot {
+            withAnimation(.easeIn(duration: 0.15)) { activeApp = .screen }
         }
     }
 
@@ -901,22 +914,44 @@ struct ContentView: View {
                     
                     // Main Content Canvas
                     if let activeApp = model.activeApp {
-                        // Display inside app view
-                        ScrollView {
-                            appContentView(activeApp)
-                                .padding(16)
+                        if activeApp == .screen {
+                            // The embedded screen handles its own gestures —
+                            // no ScrollView, it would swallow drags.
+                            ScreenAppView(model: model)
+                        } else {
+                            ScrollView {
+                                appContentView(activeApp)
+                                    .padding(16)
+                            }
+                            .background(Color.clear)
                         }
-                        .background(Color.clear)
                     } else {
                         // Home: the user's own Android apps, like a real phone.
                         VStack(spacing: 0) {
                             if model.activeSerial != nil {
-                                // Status chip: which phone / which identity
+                                // Status chip: which phone / which identity,
+                                // plus the door into the embedded screen.
                                 let identityName = model.identities.first { $0.userId == model.activeIdentityId }?.name ?? "Owner"
-                                Text("\(model.activeDeviceName) · \(identityName)")
+                                Button {
+                                    withAnimation(.easeIn(duration: 0.15)) { model.activeApp = .screen }
+                                } label: {
+                                    HStack(spacing: 5) {
+                                        Text("\(model.activeDeviceName) · \(identityName)")
+                                        Image(systemName: "play.display")
+                                            .font(.system(size: 9))
+                                            .foregroundStyle(Color.androidGreen)
+                                    }
                                     .font(.caption2)
                                     .foregroundStyle(Color.slateTextDim)
-                                    .padding(.top, 10)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                                    .background(Color.white.opacity(0.05))
+                                    .clipShape(Capsule())
+                                }
+                                .buttonStyle(.plain)
+                                .help("Open the phone's screen here")
+                                .accessibilityLabel("Open Screen")
+                                .padding(.top, 8)
 
                                 if model.activePackages.isEmpty {
                                     Spacer()
@@ -1224,6 +1259,7 @@ struct ContentView: View {
         case .devices: return "Devices"
         case .sandboxes: return "Sandboxes"
         case .settings: return "Settings"
+        case .screen: return model.activeDeviceName.isEmpty ? "Screen" : model.activeDeviceName
         }
     }
     
@@ -1236,6 +1272,8 @@ struct ContentView: View {
             SandboxesAppView(model: model)
         case .settings:
             SettingsAppView(model: model)
+        case .screen:
+            ScreenAppView(model: model)
         }
     }
     
@@ -1380,9 +1418,11 @@ struct DevicesAppView: View {
                             Button {
                                 model.selectedAVD = name
                                 model.log("Booting virtual device [\(name)]...")
-                                let ok = EmulatorManager.shared.startAVD(name: name)
+                                let ok = EmulatorManager.shared.startAVD(name: name, headless: model.headlessBoot)
                                 if ok {
-                                    model.log("Boot started — the phone window will appear shortly.")
+                                    model.log(model.headlessBoot
+                                        ? "Boot started — the phone will live in the Screen view."
+                                        : "Boot started — the phone window will appear shortly.")
                                     Task {
                                         // Pick up the new device once it registers with adb.
                                         try? await Task.sleep(nanoseconds: 8_000_000_000)
@@ -1678,6 +1718,18 @@ struct SettingsAppView: View {
                 Text("Phones")
                     .font(.caption).bold()
                     .foregroundStyle(Color.white)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle("Keep the phone inside this window", isOn: $model.headlessBoot)
+                        .font(.caption2)
+                        .foregroundStyle(Color.slateTextDim)
+                        .toggleStyle(.checkbox)
+                    Text("Beta — boots without a separate emulator window; the phone lives in the Screen view (a few frames per second).")
+                        .font(.system(size: 8))
+                        .foregroundStyle(Color.slateTextDim.opacity(0.7))
+                }
+                .padding(10)
+                .liquidGlassBackground(cornerRadius: 8, customBorderColor: Color.white.opacity(0.1))
 
                 Button(role: .destructive) {
                     model.log("Shutting down all phones…")

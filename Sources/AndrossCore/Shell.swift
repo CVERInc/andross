@@ -43,6 +43,38 @@ public enum Shell {
         public var ok: Bool { status == 0 }
     }
 
+    /// Run a command and capture stdout as raw bytes (for binary payloads
+    /// like PNG frames, where String decoding would corrupt the data).
+    public static func runData(_ args: [String]) -> (status: Int32, stdout: Data) {
+        guard let first = args.first else { return (-1, Data()) }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = args
+        process.environment = childEnvironment()
+
+        let outPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = Pipe()
+
+        var data = Data()
+        let group = DispatchGroup()
+        group.enter()
+        DispatchQueue.global().async {
+            data = outPipe.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
+
+        do {
+            try process.run()
+        } catch {
+            _ = first
+            return (-1, Data())
+        }
+        process.waitUntilExit()
+        group.wait()
+        return (process.terminationStatus, data)
+    }
+
     /// Run a command and capture its output.
     @discardableResult
     public static func run(_ args: [String], cwd: URL? = nil, stdin: String? = nil) -> Result {
