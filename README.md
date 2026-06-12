@@ -33,6 +33,13 @@
 
 ---
 
+## 🛠 開發
+```bash
+./scripts/test.sh              # 建置 + 單元測試（零依賴 runner）
+./scripts/test.sh integration  # 真的 headless 開機一台 AVD，走完身分生命週期（需已建 AVD，耗時數分鐘）
+./scripts/make-icon.sh         # 重新產生 App icon（assets/andross.icns）
+```
+
 ## 📌 誠實邊界
 *   LINE 等服務註冊**仍需要一個可收驗證的電話號碼**——andross 省掉的是「多一支手機」，不是「電話號碼」。
 *   LINE 一個帳號同時只能登入一支手機裝置；andross 適合經營**新的／副的**帳號，不是把現有手機帳號搬過來。
