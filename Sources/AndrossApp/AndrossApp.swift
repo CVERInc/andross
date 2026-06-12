@@ -68,6 +68,9 @@ final class AppModel: ObservableObject {
     @Published var identities: [EmulatorManager.AndroidUser] = []
     @Published var activeIdentityId: Int = 0
     @Published var activeDeviceName = ""
+    @Published var activeSerial: String? = nil
+    @Published var ownerPackages: [String] = []
+    @Published var runningAVDNames: Set<String> = []
     
     // Storage statistics
     @Published var hostAppSize = ""
@@ -128,12 +131,16 @@ final class AppModel: ObservableObject {
     }
     
     func refreshAVDs() {
-        avds = EmulatorManager.shared.listAVDs()
-        if selectedAVD == nil {
-            selectedAVD = avds.first
+        Task.detached(priority: .userInitiated) {
+            let list = EmulatorManager.shared.listAVDs()
+            await MainActor.run {
+                self.avds = list
+                if self.selectedAVD == nil {
+                    self.selectedAVD = list.first
+                }
+            }
         }
         refreshIdentities()
-        refreshStorageStats()
     }
     
     func checkDependencies() {
@@ -197,15 +204,15 @@ final class AppModel: ObservableObject {
             let avdSizeStr = ByteCountFormatter.string(fromByteCount: avdSize, countStyle: .file)
             let tempSizeStr = ByteCountFormatter.string(fromByteCount: tempSize, countStyle: .file)
             
-            // 4. Query Android app packages if emulator is running
+            // 4. Query third-party packages of the active identity if an emulator is running
             var statsList: [EmulatorManager.AppStorageStats] = []
             let activeUserId = await MainActor.run { self.activeIdentityId }
-            
-            let devices = Shell.run(["adb", "devices"])
-            if devices.ok && devices.stdout.contains("emulator") {
-                let packages = ["jp.naver.line.android", "com.aurora.store"]
+            let serial = await MainActor.run { self.activeSerial }
+
+            if let serial {
+                let packages = EmulatorManager.shared.listThirdPartyPackages(serial: serial, userId: activeUserId)
                 for pkg in packages {
-                    if let stats = EmulatorManager.shared.getAppStorageStats(packageName: pkg, userId: activeUserId) {
+                    if let stats = EmulatorManager.shared.getAppStorageStats(serial: serial, packageName: pkg, userId: activeUserId) {
                         statsList.append(stats)
                     }
                 }
@@ -223,43 +230,44 @@ final class AppModel: ObservableObject {
     // MARK: - Identity Management
     
     func refreshIdentities() {
-        let list = EmulatorManager.shared.listUsers()
-        self.identities = list
-        
-        let activeRes = Shell.run(["adb", "shell", "am", "get-current-user"])
-        if activeRes.ok, let activeId = Int(activeRes.stdout.trimmingCharacters(in: .whitespacesAndNewlines)) {
-            self.activeIdentityId = activeId
-        } else {
-            self.activeIdentityId = 0
-        }
-        
-        // Retrieve AVD model name
-        let nameRes = Shell.run(["adb", "emu", "avd", "name"])
-        if nameRes.ok {
-            self.activeDeviceName = nameRes.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        } else {
-            let devices = Shell.run(["adb", "devices"])
-            if devices.ok && devices.stdout.contains("emulator") {
-                self.activeDeviceName = selectedAVD ?? "Active Emulator"
-            } else {
-                self.activeDeviceName = ""
+        Task.detached(priority: .userInitiated) {
+            let manager = EmulatorManager.shared
+            let running = manager.runningAVDs()
+            let serial = running.first?.serial
+
+            var users: [EmulatorManager.AndroidUser] = []
+            var currentId = 0
+            var packages: [String] = []
+            if let serial {
+                users = manager.listUsers(serial: serial)
+                currentId = manager.currentUserId(serial: serial)
+                packages = manager.listThirdPartyPackages(serial: serial, userId: 0)
+            }
+
+            await MainActor.run {
+                self.activeSerial = serial
+                self.identities = users
+                self.activeIdentityId = currentId
+                self.ownerPackages = packages
+                self.activeDeviceName = running.first?.avdName ?? ""
+                self.runningAVDNames = Set(running.map { $0.avdName })
+                self.refreshStorageStats()
             }
         }
-        
-        refreshStorageStats()
     }
-    
+
     func createIdentity(name: String) {
         guard !name.isEmpty else { return }
+        guard let serial = activeSerial else {
+            log("No running phone — launch a virtual device first.")
+            return
+        }
         log("Creating new identity sandbox [\(name)]...")
-        
+
         Task.detached(priority: .userInitiated) {
-            if let newId = EmulatorManager.shared.createUser(name: name) {
-                // Automatically clone LINE (jp.naver.line.android) to the new sandbox
-                _ = EmulatorManager.shared.cloneApp(packageName: "jp.naver.line.android", toUser: newId)
-                
+            if let newId = EmulatorManager.shared.createUser(serial: serial, name: name) {
                 await MainActor.run {
-                    self.log("Successfully created identity [\(name)] (ID: \(newId)) and cloned LINE.")
+                    self.log("Identity [\(name)] created (ID: \(newId)). Use Clone to enable apps for it.")
                     self.refreshIdentities()
                     self.switchIdentity(id: newId)
                 }
@@ -270,11 +278,12 @@ final class AppModel: ObservableObject {
             }
         }
     }
-    
+
     func switchIdentity(id: Int) {
+        guard let serial = activeSerial else { return }
         log("Switching screen display focus to identity ID: \(id)...")
         Task.detached(priority: .userInitiated) {
-            let ok = EmulatorManager.shared.switchUser(id: id)
+            let ok = EmulatorManager.shared.switchUser(serial: serial, id: id)
             await MainActor.run {
                 if ok {
                     self.log("Identity switched successfully.")
@@ -285,18 +294,35 @@ final class AppModel: ObservableObject {
             }
         }
     }
-    
+
     func deleteIdentity(id: Int) {
         guard id != 0 else { return } // ID 0 is Owner, cannot be deleted
+        guard let serial = activeSerial else { return }
         log("Removing identity ID: \(id)...")
         Task.detached(priority: .userInitiated) {
-            let ok = EmulatorManager.shared.deleteUser(id: id)
+            let ok = EmulatorManager.shared.deleteUser(serial: serial, id: id)
             await MainActor.run {
                 if ok {
                     self.log("Identity removed successfully.")
                     self.refreshIdentities()
                 } else {
                     self.log("Failed to remove identity.")
+                }
+            }
+        }
+    }
+
+    func cloneApp(packageName: String, toUser userId: Int) {
+        guard let serial = activeSerial else { return }
+        log("Cloning \(packageName) to identity ID \(userId)...")
+        Task.detached(priority: .userInitiated) {
+            let ok = EmulatorManager.shared.cloneApp(serial: serial, packageName: packageName, toUser: userId)
+            await MainActor.run {
+                if ok {
+                    self.log("\(packageName) is now enabled for identity \(userId).")
+                    self.refreshStorageStats()
+                } else {
+                    self.log("Failed to clone \(packageName).")
                 }
             }
         }
@@ -433,14 +459,18 @@ final class AppModel: ObservableObject {
         
         if alert.runModal() == .alertFirstButtonReturn {
             log("Deleting virtual device [\(name)]...")
-            let res = Shell.run(["avdmanager", "delete", "avd", "-n", name])
-            if res.ok {
-                log("Successfully deleted device.")
-            } else {
-                log("Deletion failed: " + res.stderr)
+            Task.detached(priority: .userInitiated) {
+                let res = EmulatorManager.shared.deleteAVD(name: name)
+                await MainActor.run {
+                    if res.ok {
+                        self.log("Successfully deleted device.")
+                    } else {
+                        self.log("Deletion failed: " + res.stderr)
+                    }
+                    self.selectedAVD = nil
+                    self.refreshAVDs()
+                }
             }
-            selectedAVD = nil
-            refreshAVDs()
         }
     }
 }
@@ -1128,33 +1158,45 @@ struct DevicesAppView: View {
                 .padding(.vertical, 30)
             } else {
                 ForEach(model.avds, id: \.self) { name in
+                    let isRunning = model.runningAVDNames.contains(name)
                     HStack {
                         Image(systemName: "iphone")
-                            .foregroundStyle(model.selectedAVD == name ? Color.androidGreen : Color.slateTextDim)
+                            .foregroundStyle(isRunning ? Color.androidGreen : Color.slateTextDim)
                         Text(name)
                             .font(.body)
                         Spacer()
-                        
-                        // Launch button
-                        Button {
-                            model.selectedAVD = name
-                            model.log("Booting virtual device [\(name)]...")
-                            let ok = EmulatorManager.shared.startAVD(name: name)
-                            if ok {
-                                model.log("Boot sequence started.")
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
-                                    model.refreshIdentities()
+
+                        if isRunning {
+                            Text("Running")
+                                .font(.caption2).bold()
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(Color.androidGreen.opacity(0.2))
+                                .foregroundStyle(Color.androidGreen)
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                        } else {
+                            // Launch button
+                            Button {
+                                model.selectedAVD = name
+                                model.log("Booting virtual device [\(name)]...")
+                                let ok = EmulatorManager.shared.startAVD(name: name)
+                                if ok {
+                                    model.log("Boot started — the phone window will appear shortly.")
+                                    Task {
+                                        // Pick up the new device once it registers with adb.
+                                        try? await Task.sleep(nanoseconds: 8_000_000_000)
+                                        model.refreshIdentities()
+                                    }
+                                } else {
+                                    model.log("Boot failed: emulator engine not installed yet (create a device first to download it).")
                                 }
-                            } else {
-                                model.log("Boot sequence failed.")
+                            } label: {
+                                Text("Launch")
+                                    .font(.caption).bold()
                             }
-                        } label: {
-                            Text("Launch")
-                                .font(.caption).bold()
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        
+
                         // Delete button
                         Button {
                             model.selectedAVD = name
@@ -1164,9 +1206,10 @@ struct DevicesAppView: View {
                                 .foregroundStyle(Color.slateRed)
                         }
                         .buttonStyle(.plain)
+                        .disabled(isRunning)
                     }
                     .padding(10)
-                    .liquidGlassBackground(cornerRadius: 8, customBorderColor: model.selectedAVD == name ? Color.androidGreen.opacity(0.4) : Color.white.opacity(0.1))
+                    .liquidGlassBackground(cornerRadius: 8, customBorderColor: isRunning ? Color.androidGreen.opacity(0.4) : Color.white.opacity(0.1))
                 }
             }
         }
@@ -1215,7 +1258,23 @@ struct SandboxesAppView: View {
                         }
                         
                         Spacer()
-                        
+
+                        // Clone an owner-installed app into this identity
+                        if !model.ownerPackages.isEmpty && user.userId != 0 {
+                            Menu {
+                                ForEach(model.ownerPackages, id: \.self) { pkg in
+                                    Button(pkg) {
+                                        model.cloneApp(packageName: pkg, toUser: user.userId)
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "plus.square.on.square")
+                            }
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
+                            .help("Clone an installed app into this identity")
+                        }
+
                         if user.userId == model.activeIdentityId {
                             Text("Active")
                                 .font(.caption2).bold()
@@ -1229,7 +1288,7 @@ struct SandboxesAppView: View {
                             }
                             .buttonStyle(.bordered)
                             .controlSize(.small)
-                            
+
                             if user.userId != 0 {
                                 Button {
                                     model.deleteIdentity(id: user.userId)
@@ -1304,14 +1363,24 @@ struct InstallerAppView: View {
                 guard let provider = providers.first else { return false }
                 _ = provider.loadObject(ofClass: URL.self) { url, error in
                     if let url = url, url.pathExtension.lowercased() == "apk" {
-                        let apkSize = EmulatorManager.shared.getFileSize(path: url.path)
-                        let sizeStr = ByteCountFormatter.string(fromByteCount: apkSize, countStyle: .file)
                         Task { @MainActor in
+                            guard let serial = model.activeSerial else {
+                                model.log("No running phone — launch a virtual device before installing.")
+                                return
+                            }
+                            let apkSize = EmulatorManager.shared.getFileSize(path: url.path)
+                            let sizeStr = ByteCountFormatter.string(fromByteCount: apkSize, countStyle: .file)
                             model.log("Deploying dropped APK: \(url.lastPathComponent) (\(sizeStr))...")
-                        }
-                        _ = EmulatorManager.shared.installAPK(path: url.path) { line, transient in
-                            Task { @MainActor in
-                                model.log("  [ADB] " + line, transient: transient)
+                            Task.detached(priority: .userInitiated) {
+                                let ok = EmulatorManager.shared.installAPK(serial: serial, path: url.path) { line, transient in
+                                    Task { @MainActor in
+                                        model.log("  [ADB] " + line, transient: transient)
+                                    }
+                                }
+                                await MainActor.run {
+                                    model.log(ok ? "APK installation complete." : "APK installation failed.")
+                                    model.refreshStorageStats()
+                                }
                             }
                         }
                     } else {
@@ -1393,11 +1462,11 @@ struct StorageAppView: View {
                         ForEach(model.appStorageStats, id: \.packageName) { app in
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
-                                    Text(app.appName)
+                                    Text(app.packageName)
                                         .font(.caption2).bold()
                                         .foregroundStyle(Color.androidGreen)
                                     Spacer()
-                                    Text("Total: \(ByteCountFormatter.string(fromByteCount: app.totalSize, countStyle: .file))")
+                                    Text("Total: \(ByteCountFormatter.string(fromByteCount: app.totalKnownSize, countStyle: .file))")
                                         .font(.caption2).bold()
                                         .foregroundStyle(Color.white)
                                 }
@@ -1409,12 +1478,12 @@ struct StorageAppView: View {
                                 HStack {
                                     Text("  • User data:")
                                     Spacer()
-                                    Text(ByteCountFormatter.string(fromByteCount: app.dataSize, countStyle: .file))
+                                    Text(app.dataSize.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "n/a (needs root)")
                                 }
                                 HStack {
                                     Text("  • Cache size:")
                                     Spacer()
-                                    Text(ByteCountFormatter.string(fromByteCount: app.cacheSize, countStyle: .file))
+                                    Text(app.cacheSize.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "n/a (needs root)")
                                 }
                             }
                             .font(.system(size: 9))
@@ -1523,7 +1592,13 @@ struct SettingsAppView: View {
                 
                 Button(role: .destructive) {
                     model.log("[*] Shutting down active emulators...")
-                    EmulatorManager.shared.stopAll()
+                    Task.detached(priority: .userInitiated) {
+                        let count = EmulatorManager.shared.stopAll()
+                        await MainActor.run {
+                            model.log(count > 0 ? "Stopped \(count) emulator(s)." : "No running emulators detected.")
+                            model.refreshIdentities()
+                        }
+                    }
                 } label: {
                     HStack {
                         Spacer()

@@ -13,5 +13,9 @@ let package = Package(
         .target(name: "AndrossCore"),
         // Native macOS SwiftUI app interface.
         .executableTarget(name: "AndrossApp", dependencies: ["AndrossCore"]),
+        // Test harnesses (./scripts/test.sh) — not product CLIs. Plain
+        // executables because Command Line Tools ship no XCTest/Testing.
+        .executableTarget(name: "AndrossUnitTests", dependencies: ["AndrossCore"]),
+        .executableTarget(name: "AndrossIntegration", dependencies: ["AndrossCore"]),
     ]
 )
