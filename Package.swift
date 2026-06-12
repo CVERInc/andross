@@ -6,14 +6,11 @@ let package = Package(
     platforms: [.macOS(.v13)],
     products: [
         .library(name: "AndrossCore", targets: ["AndrossCore"]),
-        .executable(name: "andross", targets: ["andross"]),
         .executable(name: "AndrossApp", targets: ["AndrossApp"]),
     ],
     targets: [
         // Core business logic: handles Android SDK, AVD lifecycle, and ADB communication.
         .target(name: "AndrossCore"),
-        // Lightweight CLI tool.
-        .executableTarget(name: "andross", dependencies: ["AndrossCore"]),
         // Native macOS SwiftUI app interface.
         .executableTarget(name: "AndrossApp", dependencies: ["AndrossCore"]),
     ]

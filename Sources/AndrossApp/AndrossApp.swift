@@ -176,7 +176,7 @@ final class AppModel: ObservableObject {
             
             // 1. Get andross app size (estimate or actual bundle size)
             var appSize: Int64 = 0
-            let appPath = "/Users/chodaict/Applications/andross.app"
+            let appPath = home + "/Applications/andross.app"
             if fm.fileExists(atPath: appPath) {
                 appSize = EmulatorManager.shared.getDirectorySize(path: appPath)
             } else {
