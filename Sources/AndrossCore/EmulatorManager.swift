@@ -169,28 +169,35 @@ public final class EmulatorManager: Sendable {
         case aospWithAurora = 2
         case aospBlank = 3
 
-        var sdkImage: String {
+        /// SDK package id for this image at the given API level.
+        public func sdkImage(apiLevel: Int) -> String {
             switch self {
             case .googlePlay:
-                return "system-images;android-33;google_apis_playstore;arm64-v8a"
+                return "system-images;android-\(apiLevel);google_apis_playstore;arm64-v8a"
             case .aospWithAurora, .aospBlank:
-                return "system-images;android-33;default;arm64-v8a"
+                return "system-images;android-\(apiLevel);default;arm64-v8a"
             }
         }
     }
+
+    /// Android API levels offered when creating a device. 34 = Android 14
+    /// (current default — broadly compatible); 35 = Android 15.
+    public static let supportedAPILevels = [35, 34, 33]
+    public static let defaultAPILevel = 34
 
     /// Create a new virtual device (AVD) and download required SDK components.
     public func createAVD(
         name: String,
         type: SystemType,
         profile: DeviceProfile,
+        apiLevel: Int = EmulatorManager.defaultAPILevel,
         onProgress: @escaping @Sendable (String, Bool) -> Void
     ) async -> Bool {
         onProgress("Accepting Google SDK licenses...", false)
         Shell.run([cmdlineTool("sdkmanager"), "--licenses"],
                   stdin: String(repeating: "y\n", count: 50))
 
-        let image = type.sdkImage
+        let image = type.sdkImage(apiLevel: apiLevel)
         onProgress("Downloading Android system image & emulator binaries, this may take a few minutes...", false)
 
         let dlResult = Shell.runStreaming(

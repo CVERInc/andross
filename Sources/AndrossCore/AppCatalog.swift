@@ -40,4 +40,17 @@ public enum AppCatalog {
         guard let meaningful, !meaningful.isEmpty else { return packageName }
         return meaningful.prefix(1).uppercased() + meaningful.dropFirst()
     }
+
+    private static let androidReleaseNames: [Int: String] = [
+        33: "13", 34: "14", 35: "15", 36: "16",
+    ]
+
+    /// Marketing version label for an API level, e.g. 34 → "Android 14".
+    /// Falls back to the raw API level when the mapping is unknown.
+    public static func androidVersionName(apiLevel: Int) -> String {
+        if let release = androidReleaseNames[apiLevel] {
+            return "Android \(release)  (API \(apiLevel))"
+        }
+        return "API \(apiLevel)"
+    }
 }

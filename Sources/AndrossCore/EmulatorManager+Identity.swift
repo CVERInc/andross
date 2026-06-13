@@ -94,6 +94,26 @@ extension EmulatorManager {
                             "-c", "android.intent.category.LAUNCHER", "1"]).ok
     }
 
+    /// Launch an app and retry until it is actually in the foreground.
+    ///
+    /// `sys.boot_completed` flips before the package manager is fully ready,
+    /// so a single `am start` right after boot often no-ops. Retry a bounded
+    /// number of times, letting the device settle between attempts, and
+    /// confirm via the focused package. Returns true once the app is in front.
+    @discardableResult
+    public func launchUntilForeground(serial: String, packageName: String,
+                                      attempts: Int = 8,
+                                      settleSeconds: TimeInterval = 2) -> Bool {
+        for _ in 0..<max(attempts, 1) {
+            _ = launchApp(serial: serial, packageName: packageName)
+            Thread.sleep(forTimeInterval: settleSeconds)
+            if foregroundPackage(serial: serial) == packageName {
+                return true
+            }
+        }
+        return false
+    }
+
     /// Fully uninstall a package from the device (all identities).
     @discardableResult
     public func uninstallPackage(serial: String, packageName: String) -> Bool {

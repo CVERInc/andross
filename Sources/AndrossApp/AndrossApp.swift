@@ -124,6 +124,7 @@ final class AppModel: ObservableObject {
     @Published var newName = ""
     @Published var newType = 1 // 1: Play Store, 2: AOSP+Aurora, 3: Blank AOSP
     @Published var newProfile = 1 // 1: Phone Portrait, 2: Phone Landscape, 3: Tablet Portrait, 4: Tablet Landscape
+    @Published var newAPILevel = EmulatorManager.defaultAPILevel
     
     // Clean uninstallation configuration
     @Published var showUninstallSheet = false
@@ -157,23 +158,10 @@ final class AppModel: ObservableObject {
     @Published var isTablet = false
     @Published var isLandscape = false
     
-    var currentWidth: CGFloat {
-        if isTablet {
-            return isLandscape ? 800 : 500
-        } else {
-            return isLandscape ? 800 : 360
-        }
-    }
-    
-    var currentHeight: CGFloat {
-        if isTablet {
-            return isLandscape ? 500 : 800
-        } else {
-            return isLandscape ? 360 : 800
-        }
-    }
-    
-    private var lastLineIsTransient = false
+    var currentWidth: CGFloat { phoneWindowSize(isTablet: isTablet, isLandscape: isLandscape).width }
+    var currentHeight: CGFloat { phoneWindowSize(isTablet: isTablet, isLandscape: isLandscape).height }
+
+    private var logBuffer = LogBuffer()
     private var refreshTimer: Timer?
 
     init() {
@@ -212,32 +200,13 @@ final class AppModel: ObservableObject {
     }
     
     func log(_ message: String, transient: Bool = false) {
-        if transient {
-            if lastLineIsTransient && !logs.isEmpty {
-                logs[logs.count - 1] = message
-            } else {
-                logs.append(message)
-                lastLineIsTransient = true
-            }
-        } else {
-            if lastLineIsTransient && !logs.isEmpty {
-                logs[logs.count - 1] = message
-                lastLineIsTransient = false
-            } else {
-                logs.append(message)
-                lastLineIsTransient = false
-            }
-        }
-        
-        // Keep logs capped to avoid excessive memory usage
-        if logs.count > 100 {
-            logs.removeFirst()
-        }
+        logBuffer.append(message, transient: transient)
+        logs = logBuffer.lines
     }
-    
+
     func clearLogs() {
-        logs.removeAll()
-        lastLineIsTransient = false
+        logBuffer.clear()
+        logs = logBuffer.lines
     }
     
     func refreshStorageStats() {
@@ -405,16 +374,8 @@ final class AppModel: ObservableObject {
             let serial = EmulatorManager.shared.waitForBootedEmulator(timeoutSeconds: 240)
             var launched = false
             if let serial {
-                // boot_completed flips before the package manager is ready —
-                // retry until the app is actually in the foreground.
-                for _ in 0..<8 {
-                    _ = EmulatorManager.shared.launchApp(serial: serial, packageName: packageName)
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    if EmulatorManager.shared.foregroundPackage(serial: serial) == packageName {
-                        launched = true
-                        break
-                    }
-                }
+                launched = EmulatorManager.shared.launchUntilForeground(
+                    serial: serial, packageName: packageName)
             }
             await MainActor.run {
                 self.pendingLaunch = nil
@@ -510,7 +471,10 @@ final class AppModel: ObservableObject {
 
     /// Toggle headed/headless mode and reboot the phone if running.
     func toggleHeadedHeadless() {
-        guard let name = activeSerial != nil ? (activeDeviceName.isEmpty ? (selectedAVD ?? avds.first) : activeDeviceName) : (selectedAVD ?? avds.first) else { return }
+        guard let name = resolveTargetDevice(isRunning: activeSerial != nil,
+                                             activeDeviceName: activeDeviceName,
+                                             selectedAVD: selectedAVD,
+                                             avds: avds) else { return }
         let serial = activeSerial
         
         headlessBoot.toggle()
@@ -705,11 +669,12 @@ final class AppModel: ObservableObject {
         let name = newName
         let typeVal = newType
         let profileVal = newProfile
-        
+        let apiVal = newAPILevel
+
         Task.detached(priority: .userInitiated) {
             let type = EmulatorManager.SystemType(rawValue: typeVal) ?? .googlePlay
             let profile = EmulatorManager.DeviceProfile(rawValue: profileVal) ?? .phonePortrait
-            _ = await EmulatorManager.shared.createAVD(name: name, type: type, profile: profile) { progress, transient in
+            _ = await EmulatorManager.shared.createAVD(name: name, type: type, profile: profile, apiLevel: apiVal) { progress, transient in
                 Task { @MainActor in
                     self.log(progress, transient: transient)
                 }
@@ -803,31 +768,27 @@ class ConfiguratorNSView: NSView {
         }
         
         let currentSize = window.frame.size
-        log("[DEBUG] updateWindowSize - currentSize: \(currentSize), target: (\(width), \(height)), isFirstResize: \(isFirstResize)")
-        
+
         if isFirstResize {
             if isPositioningScheduled { return }
             isPositioningScheduled = true
-            
+
             let remember = UserDefaults.standard.bool(forKey: "rememberWindowPosition")
             let hasSavedX = UserDefaults.standard.object(forKey: "windowLastX") != nil
             let hasSavedTopY = UserDefaults.standard.object(forKey: "windowLastTopY") != nil
-            log("[DEBUG] isFirstResize - remember: \(remember), hasSavedX: \(hasSavedX), hasSavedTopY: \(hasSavedTopY)")
-            
+
             var newFrame: NSRect
             if remember && hasSavedX && hasSavedTopY {
                 let savedX = UserDefaults.standard.double(forKey: "windowLastX")
                 let savedTopY = UserDefaults.standard.double(forKey: "windowLastTopY")
                 let newY = savedTopY - height
                 newFrame = NSRect(x: CGFloat(savedX), y: CGFloat(newY), width: width, height: height)
-                log("[DEBUG] Restoring position to: \(newFrame)")
             } else {
                 let screen = window.screen ?? NSScreen.main
                 let screenFrame = screen?.visibleFrame ?? .zero
                 let newX = screenFrame.origin.x + (screenFrame.size.width - width) / 2
                 let newY = screenFrame.origin.y + (screenFrame.size.height - height) / 2
                 newFrame = NSRect(x: newX, y: newY, width: width, height: height)
-                log("[DEBUG] Centering window to: \(newFrame), screenFrame: \(screenFrame)")
             }
             
             self.lastFrame = newFrame
@@ -846,7 +807,6 @@ class ConfiguratorNSView: NSView {
                 // Delay disabling first resize protection to allow startup layout passes to settle.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
                     self?.isFirstResize = false
-                    self?.log("[DEBUG] Startup layout cooldown finished. User window tracking active.")
                 }
                 
                 DispatchQueue.main.async { [weak self] in
@@ -861,8 +821,7 @@ class ConfiguratorNSView: NSView {
             // Lock top-left corner during size changes!
             let newY = oldFrame.origin.y + (oldFrame.size.height - height)
             let newFrame = NSRect(x: oldFrame.origin.x, y: newY, width: width, height: height)
-            log("[DEBUG] Locking top-left to: \(newFrame)")
-            
+
             self.lastFrame = newFrame
             self.isProgrammaticMove = true
             window.setFrame(newFrame, display: true, animate: false)
@@ -876,10 +835,7 @@ class ConfiguratorNSView: NSView {
         super.viewDidMoveToWindow()
         guard let window = self.window else { return }
         
-        if isConfigured {
-            log("[DEBUG] viewDidMoveToWindow called but already configured, skipping.")
-            return
-        }
+        if isConfigured { return }
         isConfigured = true
         
         configureWindow(initial: true)
@@ -1005,18 +961,12 @@ class ConfiguratorNSView: NSView {
     }
     
     private func saveWindowPositionIfNeeded() {
-        guard let window = self.window, !isMaximizedMode, !isFirstResize, !isProgrammaticMove else { 
-            log("[DEBUG] saveWindowPositionIfNeeded skipped - window: \(self.window != nil), isMaximized: \(isMaximizedMode), isFirstResize: \(isFirstResize), isProgrammatic: \(isProgrammaticMove)")
-            return 
-        }
-        let remember = UserDefaults.standard.bool(forKey: "rememberWindowPosition")
-        if remember {
-            let frame = window.frame
-            let topY = frame.origin.y + frame.size.height
-            UserDefaults.standard.set(Double(frame.origin.x), forKey: "windowLastX")
-            UserDefaults.standard.set(Double(topY), forKey: "windowLastTopY")
-            log("[DEBUG] Saved window position: X: \(frame.origin.x), TopY: \(topY)")
-        }
+        guard let window = self.window, !isMaximizedMode, !isFirstResize, !isProgrammaticMove else { return }
+        guard UserDefaults.standard.bool(forKey: "rememberWindowPosition") else { return }
+        let frame = window.frame
+        let topY = frame.origin.y + frame.size.height
+        UserDefaults.standard.set(Double(frame.origin.x), forKey: "windowLastX")
+        UserDefaults.standard.set(Double(topY), forKey: "windowLastTopY")
     }
     
     @objc private func handleToggleMaximize() {
@@ -1488,6 +1438,13 @@ struct ContentView: View {
                     Text("Phone (Landscape)").tag(2)
                     Text("Tablet (Portrait)").tag(3)
                     Text("Tablet (Landscape)").tag(4)
+                }
+                .frame(width: 260)
+
+                Picker("Android", selection: $model.newAPILevel) {
+                    ForEach(EmulatorManager.supportedAPILevels, id: \.self) { level in
+                        Text(AppCatalog.androidVersionName(apiLevel: level)).tag(level)
+                    }
                 }
                 .frame(width: 260)
                 

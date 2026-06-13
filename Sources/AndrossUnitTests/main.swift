@@ -133,6 +133,55 @@ expect(AndrossParse.bootCompleted(from: "1\n"), "bootCompleted true for 1")
 expect(!AndrossParse.bootCompleted(from: ""), "bootCompleted false for empty")
 expect(!AndrossParse.bootCompleted(from: "0\n"), "bootCompleted false for 0")
 
+// MARK: LogBuffer (transient coalescing + cap)
+
+var lb = LogBuffer(limit: 3)
+lb.append("a")
+lb.append("downloading 10%", transient: true)
+lb.append("downloading 80%", transient: true)
+expectEqual(lb.lines, ["a", "downloading 80%"], "transient line overwrites previous transient")
+lb.append("done")
+expectEqual(lb.lines, ["a", "done"], "permanent line replaces last transient")
+lb.append("x"); lb.append("y")
+expectEqual(lb.lines, ["done", "x", "y"], "buffer caps to limit, dropping oldest")
+lb.clear()
+expectEqual(lb.lines, [], "clear empties the buffer")
+var lb2 = LogBuffer()
+lb2.append("one"); lb2.append("two")
+expectEqual(lb2.lines, ["one", "two"], "consecutive permanent lines stack")
+
+// MARK: resolveTargetDevice
+
+expectEqual(resolveTargetDevice(isRunning: true, activeDeviceName: "Pixel",
+            selectedAVD: "Sel", avds: ["A"]), "Pixel", "running + known name → active device")
+expectEqual(resolveTargetDevice(isRunning: true, activeDeviceName: "",
+            selectedAVD: "Sel", avds: ["A"]), "Sel", "running + unknown name → selected")
+expectEqual(resolveTargetDevice(isRunning: false, activeDeviceName: "Pixel",
+            selectedAVD: "Sel", avds: ["A"]), "Sel", "not running → selected (ignore stale name)")
+expectEqual(resolveTargetDevice(isRunning: false, activeDeviceName: "",
+            selectedAVD: nil, avds: ["First", "B"]), "First", "no selection → first AVD")
+expectEqual(resolveTargetDevice(isRunning: false, activeDeviceName: "",
+            selectedAVD: nil, avds: []), nil, "nothing available → nil")
+
+// MARK: phoneWindowSize
+
+expectEqual(phoneWindowSize(isTablet: false, isLandscape: false), CGSize(width: 360, height: 800), "phone portrait")
+expectEqual(phoneWindowSize(isTablet: false, isLandscape: true), CGSize(width: 800, height: 360), "phone landscape")
+expectEqual(phoneWindowSize(isTablet: true, isLandscape: false), CGSize(width: 500, height: 800), "tablet portrait")
+expectEqual(phoneWindowSize(isTablet: true, isLandscape: true), CGSize(width: 800, height: 500), "tablet landscape")
+
+// MARK: system image / API level
+
+expectEqual(EmulatorManager.SystemType.googlePlay.sdkImage(apiLevel: 34),
+            "system-images;android-34;google_apis_playstore;arm64-v8a", "Play image uses API level")
+expectEqual(EmulatorManager.SystemType.aospBlank.sdkImage(apiLevel: 35),
+            "system-images;android-35;default;arm64-v8a", "AOSP image uses API level")
+expectEqual(EmulatorManager.defaultAPILevel, 34, "default API level is 34 (Android 14)")
+expect(EmulatorManager.supportedAPILevels.contains(EmulatorManager.defaultAPILevel),
+       "default API level is offered in the picker")
+expect(AppCatalog.androidVersionName(apiLevel: 34).contains("Android 14"), "API 34 labelled Android 14")
+expectEqual(AppCatalog.androidVersionName(apiLevel: 99), "API 99", "unknown API level falls back to raw")
+
 // MARK: result
 
 if failures > 0 {

@@ -3,9 +3,10 @@ import Foundation
 // MARK: - Embedded screen: frame capture + input injection
 //
 // Lets the app show the phone inside its own window (emulator runs
-// headless) instead of a separate emulator window. MVP transport is
-// `screencap` polling — a few fps, fine for messengers; a low-latency
-// scrcpy-style stream can replace it without changing this API.
+// headless) instead of a separate emulator window. Transport is a single
+// persistent `adb exec-out` shell that streams raw RGBA frames (see
+// `streamScreen`); `captureScreen` remains for one-shot grabs. A future
+// h264 scrcpy-style encoder could cut bandwidth without changing this API.
 
 extension EmulatorManager {
     /// Package of the window currently focused on the device.
