@@ -8,6 +8,23 @@ import Foundation
 // scrcpy-style stream can replace it without changing this API.
 
 extension EmulatorManager {
+    /// Package of the window currently focused on the device.
+    public func foregroundPackage(serial: String) -> String? {
+        let result = adb(serial, ["shell", "dumpsys window | grep -m1 mCurrentFocus"])
+        guard result.ok else { return nil }
+        return AndrossParse.focusedPackage(from: result.stdout)
+    }
+
+    /// Package of the device's default launcher (the surface the thin shell
+    /// deliberately never shows).
+    public func defaultLauncherPackage(serial: String) -> String? {
+        let result = adb(serial, ["shell", "cmd", "package", "resolve-activity", "--brief",
+                                  "-a", "android.intent.action.MAIN",
+                                  "-c", "android.intent.category.HOME"])
+        guard result.ok else { return nil }
+        return AndrossParse.launcherPackage(from: result.stdout)
+    }
+
     /// Grab one PNG frame of the device's screen. Returns nil while the
     /// device is still booting or when capture fails.
     public func captureScreen(serial: String) -> Data? {

@@ -97,13 +97,11 @@ struct ScreenAppView: View {
                 Spacer()
             }
 
-            // Android navigation bar (back / home / recents)
-            HStack(spacing: 44) {
-                navKey(icon: "chevron.backward", key: .back, label: "Back")
-                navKey(icon: "circle", key: .home, label: "Android Home")
-                navKey(icon: "square", key: .appSwitch, label: "Recent Apps")
-            }
-            .padding(.vertical, 6)
+            // Thin-shell navigation: only Back. Android's own home and
+            // recents have no meaning here — leaving the app returns to
+            // the native home automatically.
+            navKey(icon: "chevron.backward", key: .back, label: "Back")
+                .padding(.vertical, 4)
 
             Text("Beta · streams a few frames per second over adb")
                 .font(.system(size: 8))
@@ -175,9 +173,17 @@ struct ScreenAppView: View {
     }
 
     /// Sequential frame loop — the next capture starts only after the last
-    /// one finished, so adb is never flooded.
+    /// one finished, so adb is never flooded. Every few frames it checks the
+    /// foreground app: the moment Android lands on its own launcher, the
+    /// thin shell takes over again (the Android desktop is never shown).
     private func streamFrames() async {
         guard let serial = model.activeSerial else { return }
+
+        let launcher = await Task.detached(priority: .userInitiated) {
+            EmulatorManager.shared.defaultLauncherPackage(serial: serial)
+        }.value
+
+        var frameCount = 0
         while !Task.isCancelled {
             let data = await Task.detached(priority: .userInitiated) {
                 EmulatorManager.shared.captureScreen(serial: serial)
@@ -189,6 +195,22 @@ struct ScreenAppView: View {
                 }
                 frame = image
             }
+
+            frameCount += 1
+            // Don't check during the first few seconds — an app we just
+            // launched may still be cold-starting behind the launcher.
+            if let launcher, frameCount >= 9, frameCount % 3 == 0 {
+                let foreground = await Task.detached(priority: .userInitiated) {
+                    EmulatorManager.shared.foregroundPackage(serial: serial)
+                }.value
+                if !Task.isCancelled, foreground == launcher {
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        model.activeApp = nil
+                    }
+                    return
+                }
+            }
+
             try? await Task.sleep(nanoseconds: 120_000_000)
         }
     }

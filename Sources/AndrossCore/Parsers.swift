@@ -105,4 +105,35 @@ public enum AndrossParse {
     public static func bootCompleted(from output: String) -> Bool {
         output.trimmingCharacters(in: .whitespacesAndNewlines) == "1"
     }
+
+    /// Parse the focused package out of a `dumpsys window` mCurrentFocus line:
+    /// `mCurrentFocus=Window{1fafa71 u0 com.example.app/com.example.app.MainActivity}`
+    public static func focusedPackage(from output: String) -> String? {
+        guard let line = output.components(separatedBy: .newlines)
+            .first(where: { $0.contains("mCurrentFocus=") }) else { return nil }
+        // Last space-separated token inside the braces, before the closing }.
+        guard let braceStart = line.firstIndex(of: "{"),
+              let braceEnd = line.lastIndex(of: "}") else { return nil }
+        let inner = line[line.index(after: braceStart)..<braceEnd]
+        guard let component = inner.split(separator: " ").last else { return nil }
+        let package = component.split(separator: "/").first.map(String.init)
+        return (package?.isEmpty == false) ? package : nil
+    }
+
+    /// Parse `cmd package resolve-activity --brief …` output into the full
+    /// component (last line is `com.pkg/com.pkg.SomeActivity`).
+    public static func resolvedComponent(from output: String) -> String? {
+        let lines = output.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard let last = lines.last, last.contains("/") else { return nil }
+        return last
+    }
+
+    /// Package part of a resolved HOME component — the default launcher.
+    public static func launcherPackage(from output: String) -> String? {
+        guard let component = resolvedComponent(from: output) else { return nil }
+        let package = component.split(separator: "/").first.map(String.init)
+        return (package?.isEmpty == false) ? package : nil
+    }
 }

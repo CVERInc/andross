@@ -36,6 +36,29 @@ cat > "$DEST/Contents/Info.plist" <<'PLIST'
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Android Package</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Default</string>
+      <key>LSItemContentTypes</key>
+      <array><string>com.android.package-archive</string></array>
+    </dict>
+  </array>
+  <key>UTImportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key><string>com.android.package-archive</string>
+      <key>UTTypeDescription</key><string>Android Package</string>
+      <key>UTTypeConformsTo</key>
+      <array><string>public.data</string><string>public.archive</string></array>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key><array><string>apk</string></array>
+      </dict>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST

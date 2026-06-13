@@ -39,14 +39,48 @@ extension View {
     }
 }
 
+/// Receives .apk files opened from Finder (double-click / drag onto the
+/// app icon) — the thin Android just runs whatever you hand it.
+final class AndrossAppDelegate: NSObject, NSApplicationDelegate {
+    func application(_ application: NSApplication, open urls: [URL]) {
+        NSLog("andross: open urls: %@", urls.map(\.path).joined(separator: ", "))
+        for url in urls where url.pathExtension.lowercased() == "apk" {
+            Task { @MainActor in
+                AppModel.shared.handleIncomingAPK(url)
+            }
+        }
+    }
+
+    // Some launch paths still deliver documents through the legacy API.
+    func application(_ sender: NSApplication, openFile filename: String) -> Bool {
+        NSLog("andross: openFile: %@", filename)
+        let url = URL(fileURLWithPath: filename)
+        guard url.pathExtension.lowercased() == "apk" else { return false }
+        Task { @MainActor in
+            AppModel.shared.handleIncomingAPK(url)
+        }
+        return true
+    }
+}
+
 @main
 struct AndrossApp: App {
+    @NSApplicationDelegateAdaptor(AndrossAppDelegate.self) var delegate
+
     var body: some Scene {
         WindowGroup("andross") {
             ContentView()
                 .preferredColorScheme(.dark)
                 .tint(.androidGreen)
                 .background(Color.clear)
+                // SwiftUI lifecycle delivers Finder-opened documents here,
+                // not to the app delegate's open-urls callback.
+                .onOpenURL { url in
+                    NSLog("andross: onOpenURL: %@", url.path)
+                    if url.pathExtension.lowercased() == "apk" {
+                        AppModel.shared.handleIncomingAPK(url)
+                    }
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
@@ -56,6 +90,8 @@ struct AndrossApp: App {
 // GUI State Control Model
 @MainActor
 final class AppModel: ObservableObject {
+    static let shared = AppModel()
+
     @Published var avds: [String] = []
     @Published var selectedAVD: String?
     @Published var logs: [String] = []
@@ -72,6 +108,14 @@ final class AppModel: ObservableObject {
     @Published var ownerPackages: [String] = []
     @Published var activePackages: [String] = []
     @Published var runningAVDNames: Set<String> = []
+    /// App waiting for the phone to finish booting (tile tapped while off).
+    @Published var pendingLaunch: String? = nil
+    /// Last-known apps, so the home grid survives the phone being off.
+    @Published var cachedPackages: [String] = UserDefaults.standard.stringArray(forKey: "cachedPackages") ?? []
+
+    /// What the home grid shows: live list when the phone is on,
+    /// last-known list when it's off.
+    var homePackages: [String] { activeSerial != nil ? activePackages : cachedPackages }
     
     // Storage statistics
     @Published var hostAppSize = ""
@@ -281,6 +325,10 @@ final class AppModel: ObservableObject {
                 self.activePackages = currentPackages
                 self.activeDeviceName = running.first?.avdName ?? ""
                 self.runningAVDNames = Set(running.map { $0.avdName })
+                if serial != nil, self.cachedPackages != currentPackages {
+                    self.cachedPackages = currentPackages
+                    UserDefaults.standard.set(currentPackages, forKey: "cachedPackages")
+                }
                 if changed {
                     self.refreshStorageStats()
                 }
@@ -339,6 +387,102 @@ final class AppModel: ObservableObject {
                     self.refreshIdentities()
                 } else {
                     self.log("Failed to remove identity.")
+                }
+            }
+        }
+    }
+
+    /// Tile tapped while the phone is off: boot it, then launch the app —
+    /// the user never has to think about "booting a phone".
+    func bootAndLaunch(packageName: String) {
+        guard pendingLaunch == nil else { return }
+        guard let name = selectedAVD ?? avds.first else {
+            activeApp = .devices
+            return
+        }
+        let headless = headlessBoot
+        pendingLaunch = packageName
+        log("Starting the phone for \(AppCatalog.displayName(for: packageName))…")
+        guard EmulatorManager.shared.startAVD(name: name, headless: headless) else {
+            pendingLaunch = nil
+            log("Couldn't start the phone — the engine isn't installed yet.")
+            return
+        }
+        Task.detached(priority: .userInitiated) {
+            let serial = EmulatorManager.shared.waitForBootedEmulator(timeoutSeconds: 240)
+            var launched = false
+            if let serial {
+                // boot_completed flips before the package manager is ready —
+                // retry until the app is actually in the foreground.
+                for _ in 0..<8 {
+                    _ = EmulatorManager.shared.launchApp(serial: serial, packageName: packageName)
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    if EmulatorManager.shared.foregroundPackage(serial: serial) == packageName {
+                        launched = true
+                        break
+                    }
+                }
+            }
+            await MainActor.run {
+                self.pendingLaunch = nil
+                if let serial {
+                    self.activeSerial = serial
+                    self.refreshIdentities()
+                    if launched && headless {
+                        withAnimation(.easeIn(duration: 0.15)) { self.activeApp = .screen }
+                    } else if !launched {
+                        self.log("\(AppCatalog.displayName(for: packageName)) didn't open — tap it again.")
+                    }
+                } else {
+                    self.log("The phone didn't finish starting in time.")
+                }
+            }
+        }
+    }
+
+    /// An .apk arrived from Finder. Install it — booting the phone first
+    /// if needed.
+    func handleIncomingAPK(_ url: URL) {
+        if activeSerial != nil {
+            installAPK(at: url)
+            return
+        }
+        guard let name = selectedAVD ?? avds.first else {
+            log("Create a phone first, then open the .apk again.")
+            activeApp = .devices
+            return
+        }
+        log("Starting the phone to install \(url.lastPathComponent)…")
+        guard EmulatorManager.shared.startAVD(name: name, headless: headlessBoot) else {
+            log("Couldn't start the phone — the engine isn't installed yet.")
+            return
+        }
+        Task.detached(priority: .userInitiated) {
+            let serial = EmulatorManager.shared.waitForBootedEmulator(timeoutSeconds: 240)
+            await MainActor.run {
+                if let serial {
+                    self.activeSerial = serial
+                    self.installAPK(at: url)
+                    self.refreshIdentities()
+                } else {
+                    self.log("The phone didn't finish starting in time.")
+                }
+            }
+        }
+    }
+
+    /// Open the embedded screen — but never onto Android's own launcher;
+    /// the thin shell IS the launcher. If nothing is open, say so instead.
+    func openScreen() {
+        guard let serial = activeSerial else { return }
+        Task.detached(priority: .userInitiated) {
+            let launcher = EmulatorManager.shared.defaultLauncherPackage(serial: serial)
+            let foreground = EmulatorManager.shared.foregroundPackage(serial: serial)
+            await MainActor.run {
+                if let launcher, foreground == launcher {
+                    self.log("Nothing is open on the phone — tap an app to start one.")
+                } else {
+                    withAnimation(.easeIn(duration: 0.15)) { self.activeApp = .screen }
                 }
             }
         }
@@ -870,7 +1014,8 @@ class ConfiguratorNSView: NSView, NSWindowDelegate {
 }
 
 struct ContentView: View {
-    @StateObject private var model = AppModel()
+    // The shared instance — the app delegate routes Finder-opened APKs here.
+    @StateObject private var model = AppModel.shared
     @State private var showCreateSheet = false
     @State private var showSizesMenu = false
     @State private var hoverTask: Task<Void, Never>? = nil
@@ -927,13 +1072,15 @@ struct ContentView: View {
                         }
                     } else {
                         // Home: the user's own Android apps, like a real phone.
+                        // Tiles persist while the phone is off — tapping one
+                        // boots it and launches the app.
                         VStack(spacing: 0) {
                             if model.activeSerial != nil {
                                 // Status chip: which phone / which identity,
                                 // plus the door into the embedded screen.
                                 let identityName = model.identities.first { $0.userId == model.activeIdentityId }?.name ?? "Owner"
                                 Button {
-                                    withAnimation(.easeIn(duration: 0.15)) { model.activeApp = .screen }
+                                    model.openScreen()
                                 } label: {
                                     HStack(spacing: 5) {
                                         Text("\(model.activeDeviceName) · \(identityName)")
@@ -952,49 +1099,46 @@ struct ContentView: View {
                                 .help("Open the phone's screen here")
                                 .accessibilityLabel("Open Screen")
                                 .padding(.top, 8)
+                            } else if !model.homePackages.isEmpty {
+                                Text(model.pendingLaunch != nil ? "Starting the phone…" : "Phone is off — tap an app to start it.")
+                                    .font(.caption2)
+                                    .foregroundStyle(Color.slateTextDim)
+                                    .padding(.top, 12)
+                            }
 
-                                if model.activePackages.isEmpty {
-                                    Spacer()
-                                    VStack(spacing: 10) {
-                                        Image(systemName: "square.and.arrow.down")
-                                            .font(.system(size: 28))
-                                            .foregroundStyle(Color.slateTextDim)
-                                        Text("No apps yet.")
-                                            .font(.caption)
-                                            .foregroundStyle(Color.slateTextDim)
-                                        Text("Drop an .apk file anywhere in this window,\nor install from the store inside the phone.")
-                                            .font(.system(size: 10))
-                                            .multilineTextAlignment(.center)
-                                            .foregroundStyle(Color.slateTextDim.opacity(0.8))
-                                    }
-                                    Spacer()
-                                } else {
-                                    ScrollView {
-                                        LazyVGrid(columns: Array(repeating: GridItem(.fixed(86), spacing: 18), count: model.isLandscape ? 6 : 3), spacing: 20) {
-                                            ForEach(model.activePackages, id: \.self) { pkg in
-                                                androidAppIcon(packageName: pkg) {
-                                                    model.launchApp(packageName: pkg)
-                                                }
-                                            }
-                                        }
-                                        .padding(.horizontal, 20)
-                                        .padding(.top, 18)
-                                    }
-                                }
-                            } else {
+                            if model.homePackages.isEmpty {
                                 Spacer()
                                 VStack(spacing: 10) {
-                                    Image(systemName: "iphone.slash")
+                                    Image(systemName: "square.and.arrow.down")
                                         .font(.system(size: 28))
                                         .foregroundStyle(Color.slateTextDim)
-                                    Text("No phone is running.")
+                                    Text("No apps yet.")
                                         .font(.caption)
                                         .foregroundStyle(Color.slateTextDim)
-                                    Text("Your apps will appear here once a phone is on.")
+                                    Text("Drop an .apk file anywhere in this window —\nandross takes care of the rest.")
                                         .font(.system(size: 10))
+                                        .multilineTextAlignment(.center)
                                         .foregroundStyle(Color.slateTextDim.opacity(0.8))
                                 }
                                 Spacer()
+                            } else {
+                                ScrollView {
+                                    LazyVGrid(columns: Array(repeating: GridItem(.fixed(86), spacing: 18), count: model.isLandscape ? 6 : 3), spacing: 20) {
+                                        ForEach(model.homePackages, id: \.self) { pkg in
+                                            androidAppIcon(packageName: pkg,
+                                                           dimmed: model.activeSerial == nil,
+                                                           busy: model.pendingLaunch == pkg) {
+                                                if model.activeSerial != nil {
+                                                    model.launchApp(packageName: pkg)
+                                                } else {
+                                                    model.bootAndLaunch(packageName: pkg)
+                                                }
+                                            }
+                                        }
+                                    }
+                                    .padding(.horizontal, 20)
+                                    .padding(.top, 18)
+                                }
                             }
 
                             // Dock: power + the three system surfaces.
@@ -1309,26 +1453,37 @@ struct ContentView: View {
 
     /// Home-screen icon for an installed Android app: letter avatar tile
     /// (we can't cheaply extract real icons from APKs) + display name.
-    private func androidAppIcon(packageName: String, action: @escaping () -> Void) -> some View {
+    /// `dimmed` marks tiles shown while the phone is off; `busy` shows the
+    /// boot-in-progress spinner.
+    private func androidAppIcon(packageName: String, dimmed: Bool = false, busy: Bool = false,
+                                action: @escaping () -> Void) -> some View {
         let name = AppCatalog.displayName(for: packageName)
         let color = Self.avatarPalette[abs(packageName.hashValue) % Self.avatarPalette.count]
         return Button(action: action) {
             VStack(spacing: 7) {
-                Text(String(name.prefix(1)).uppercased())
-                    .font(.system(size: 26, weight: .bold, design: .rounded))
-                    .foregroundStyle(Color.slateDeep)
-                    .frame(width: 58, height: 58)
-                    .background(
-                        LinearGradient(colors: [color, color.opacity(0.72)],
-                                       startPoint: .topLeading, endPoint: .bottomTrailing)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                ZStack {
+                    Text(String(name.prefix(1)).uppercased())
+                        .font(.system(size: 26, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color.slateDeep)
+                        .frame(width: 58, height: 58)
+                        .background(
+                            LinearGradient(colors: [color, color.opacity(0.72)],
+                                           startPoint: .topLeading, endPoint: .bottomTrailing)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .opacity(dimmed && !busy ? 0.55 : 1)
+
+                    if busy {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
 
                 Text(name)
                     .font(.system(size: 10, weight: .medium))
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .foregroundStyle(Color.white.opacity(0.9))
+                    .foregroundStyle(Color.white.opacity(dimmed && !busy ? 0.6 : 0.9))
                     .frame(maxWidth: 82)
             }
         }

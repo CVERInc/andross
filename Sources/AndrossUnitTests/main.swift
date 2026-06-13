@@ -110,6 +110,23 @@ expectEqual(AndrossParse.lsFileSize(from: "-rw-r--r-- 1 system system 123456789 
             123_456_789, "lsFileSize finds the size column")
 expectEqual(AndrossParse.lsFileSize(from: "ls: /x: No such file or directory"), nil, "lsFileSize nil on missing file")
 
+// MARK: focused package / launcher
+
+expectEqual(AndrossParse.focusedPackage(from: "  mCurrentFocus=Window{1fafa71 u0 com.google.android.dialer/com.google.android.dialer.extensions.GoogleDialtactsActivity}"),
+            "com.google.android.dialer", "focusedPackage parses dialer")
+expectEqual(AndrossParse.focusedPackage(from: "mCurrentFocus=null"), nil, "focusedPackage nil on null focus")
+expectEqual(AndrossParse.focusedPackage(from: ""), nil, "focusedPackage nil on empty")
+
+let launcherOutput = """
+priority=0 preferredOrder=NONE match=0x108000 specificIndex=-1 isDefault=true
+com.google.android.apps.nexuslauncher/.NexusLauncherActivity
+"""
+expectEqual(AndrossParse.launcherPackage(from: launcherOutput),
+            "com.google.android.apps.nexuslauncher", "launcherPackage parses resolve-activity output")
+expectEqual(AndrossParse.launcherPackage(from: "No activity found"), nil, "launcherPackage nil when unresolved")
+expectEqual(AndrossParse.resolvedComponent(from: launcherOutput),
+            "com.google.android.apps.nexuslauncher/.NexusLauncherActivity", "resolvedComponent keeps full component")
+
 // MARK: boot prop
 
 expect(AndrossParse.bootCompleted(from: "1\n"), "bootCompleted true for 1")

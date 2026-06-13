@@ -79,12 +79,19 @@ extension EmulatorManager {
     }
 
     /// Launch an app on the device for the current foreground identity.
-    /// Uses monkey with the LAUNCHER category so we don't need to know the
-    /// app's main activity name.
+    /// Resolves the app's launcher activity and starts it directly with
+    /// `am start` — monkey aborts (exit 251) on freshly booted devices.
     @discardableResult
     public func launchApp(serial: String, packageName: String) -> Bool {
-        adb(serial, ["shell", "monkey", "-p", packageName,
-                     "-c", "android.intent.category.LAUNCHER", "1"]).ok
+        let resolve = adb(serial, ["shell", "cmd", "package", "resolve-activity", "--brief",
+                                   "-a", "android.intent.action.MAIN",
+                                   "-c", "android.intent.category.LAUNCHER", packageName])
+        if resolve.ok, let component = AndrossParse.resolvedComponent(from: resolve.stdout) {
+            return adb(serial, ["shell", "am", "start", "-n", component]).ok
+        }
+        // Fallback when resolution fails (e.g. unusual manifest).
+        return adb(serial, ["shell", "monkey", "-p", packageName,
+                            "-c", "android.intent.category.LAUNCHER", "1"]).ok
     }
 
     /// Fully uninstall a package from the device (all identities).
