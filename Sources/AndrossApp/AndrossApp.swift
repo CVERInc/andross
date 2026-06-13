@@ -43,7 +43,6 @@ extension View {
 /// app icon) — the thin Android just runs whatever you hand it.
 final class AndrossAppDelegate: NSObject, NSApplicationDelegate {
     func application(_ application: NSApplication, open urls: [URL]) {
-        NSLog("andross: open urls: %@", urls.map(\.path).joined(separator: ", "))
         for url in urls where url.pathExtension.lowercased() == "apk" {
             Task { @MainActor in
                 AppModel.shared.handleIncomingAPK(url)
@@ -53,7 +52,6 @@ final class AndrossAppDelegate: NSObject, NSApplicationDelegate {
 
     // Some launch paths still deliver documents through the legacy API.
     func application(_ sender: NSApplication, openFile filename: String) -> Bool {
-        NSLog("andross: openFile: %@", filename)
         let url = URL(fileURLWithPath: filename)
         guard url.pathExtension.lowercased() == "apk" else { return false }
         Task { @MainActor in
@@ -76,7 +74,6 @@ struct AndrossApp: App {
                 // SwiftUI lifecycle delivers Finder-opened documents here,
                 // not to the app delegate's open-urls callback.
                 .onOpenURL { url in
-                    NSLog("andross: onOpenURL: %@", url.path)
                     if url.pathExtension.lowercased() == "apk" {
                         AppModel.shared.handleIncomingAPK(url)
                     }
@@ -244,15 +241,8 @@ final class AppModel: ObservableObject {
             let fm = FileManager.default
             let home = NSHomeDirectory()
             
-            // 1. Get andross app size (estimate or actual bundle size)
-            var appSize: Int64 = 0
-            let appPath = home + "/Applications/andross.app"
-            if fm.fileExists(atPath: appPath) {
-                appSize = EmulatorManager.shared.getDirectorySize(path: appPath)
-            } else {
-                let bundlePath = Bundle.main.bundlePath
-                appSize = EmulatorManager.shared.getDirectorySize(path: bundlePath)
-            }
+            // 1. Get andross app size from its own bundle (wherever it lives)
+            let appSize = EmulatorManager.shared.getDirectorySize(path: Bundle.main.bundlePath)
             
             // 2. Get AVD size (~/.android)
             let avdPath = URL(fileURLWithPath: home).appendingPathComponent(".android").path

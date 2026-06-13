@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build a double-clickable andross.app from the SwiftUI target — no Xcode needed.
 #
-#   ./scripts/build-app.sh                 # release build → ~/Applications/andross.app
+#   ./scripts/build-app.sh                 # release build → /Applications/andross.app
 #   ./scripts/build-app.sh debug           # faster debug build
 #   ./scripts/build-app.sh release /tmp/andross.app   # custom destination
 
@@ -9,7 +9,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CONFIG="${1:-release}"
-DEST="${2:-$HOME/Applications/andross.app}"
+DEST="${2:-/Applications/andross.app}"
 
 echo "▸ swift build -c $CONFIG --product AndrossApp"
 swift build -c "$CONFIG" --product AndrossApp
