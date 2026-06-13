@@ -6,22 +6,29 @@ import AndrossCore
 /// can't be used here: the window is movable-by-background, and a mouse-down
 /// on a non-control view starts a window drag instead of the gesture. This
 /// NSView opts out of window dragging and reports tap/drag endpoints in
-/// top-left coordinates.
+/// top-left coordinates. It also intercepts key down events and forwards
+/// them to the running virtual device.
 private struct ScreenInteraction: NSViewRepresentable {
     let onGesture: (_ start: CGPoint, _ end: CGPoint, _ viewSize: CGSize) -> Void
+    let onText: (_ text: String) -> Void
+    let onKey: (_ keycode: Int) -> Void
 
     final class InteractionView: NSView {
         var onGesture: ((CGPoint, CGPoint, CGSize) -> Void)?
+        var onText: ((String) -> Void)?
+        var onKey: ((Int) -> Void)?
         private var downPoint: CGPoint?
 
         override var mouseDownCanMoveWindow: Bool { false }
         override var isFlipped: Bool { true }
+        override var acceptsFirstResponder: Bool { true }
 
         // The borderless window never becomes key, so every click arrives
         // as a "first mouse" — accept it or we'd never see any events.
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
         override func mouseDown(with event: NSEvent) {
+            window?.makeFirstResponder(self)
             downPoint = convert(event.locationInWindow, from: nil)
         }
 
@@ -31,16 +38,66 @@ private struct ScreenInteraction: NSViewRepresentable {
             let end = convert(event.locationInWindow, from: nil)
             onGesture?(start, end, bounds.size)
         }
+
+        override func keyDown(with event: NSEvent) {
+            // Check for Command+V (Paste shortcut)
+            let modifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if modifierFlags == .command {
+                if let chars = event.charactersIgnoringModifiers?.lowercased(), chars == "v" {
+                    if let clipboardText = NSPasteboard.general.string(forType: .string), !clipboardText.isEmpty {
+                        onText?(clipboardText)
+                    }
+                    return
+                }
+            }
+
+            guard let characters = event.characters, !characters.isEmpty else {
+                super.keyDown(with: event)
+                return
+            }
+
+            // Check for special keycodes
+            let keyCode = event.keyCode
+            var androidKey: Int? = nil
+            switch keyCode {
+            case 123: androidKey = 21 // DPAD_LEFT
+            case 124: androidKey = 22 // DPAD_RIGHT
+            case 126: androidKey = 19 // DPAD_UP
+            case 125: androidKey = 20 // DPAD_DOWN
+            case 51:  androidKey = 67 // DEL (Backspace)
+            case 36:  androidKey = 66 // ENTER
+            case 48:  androidKey = 61 // TAB
+            case 53:  androidKey = 4  // BACK (Escape)
+            default: break
+            }
+
+            if let androidKey {
+                onKey?(androidKey)
+            } else {
+                // Filter out control characters that should not be typed directly
+                let filtered = characters.filter { char in
+                    let scalar = char.unicodeScalars.first?.value ?? 0
+                    return scalar >= 0x20 || scalar == 9 || scalar == 10 || scalar == 13
+                }
+                if !filtered.isEmpty {
+                    onText?(String(filtered))
+                }
+            }
+        }
     }
 
     func makeNSView(context: Context) -> InteractionView {
         let view = InteractionView()
         view.onGesture = onGesture
+        view.onText = onText
+        view.onKey = onKey
         return view
     }
 
     func updateNSView(_ view: InteractionView, context: Context) {
         view.onGesture = onGesture
+        view.onText = onText
+        view.onKey = onKey
     }
 }
 
@@ -48,7 +105,7 @@ private struct ScreenInteraction: NSViewRepresentable {
 ///
 /// Frames arrive by polling `screencap` over adb — a few fps, enough for
 /// messengers and setup flows. Clicks and drags are mapped back to device
-/// coordinates and injected as taps/swipes.
+/// coordinates and injected as taps/swipes. Keyboards forward events.
 struct ScreenAppView: View {
     @ObservedObject var model: AppModel
 
@@ -56,58 +113,93 @@ struct ScreenAppView: View {
     @State private var devicePixels: CGSize = .zero
 
     var body: some View {
-        VStack(spacing: 8) {
-            if model.activeSerial == nil {
-                Spacer()
-                VStack(spacing: 10) {
-                    Image(systemName: "iphone.slash")
-                        .font(.system(size: 28))
-                        .foregroundStyle(Color.slateTextDim)
-                    Text("No phone is running.")
-                        .font(.caption)
-                        .foregroundStyle(Color.slateTextDim)
+        ZStack(alignment: .topTrailing) {
+            VStack(spacing: 4) {
+                if model.activeSerial == nil {
+                    Spacer()
+                    VStack(spacing: 10) {
+                        Image(systemName: "iphone.slash")
+                            .font(.system(size: 28))
+                            .foregroundStyle(Color.slateTextDim)
+                        Text("No phone is running.")
+                            .font(.caption)
+                            .foregroundStyle(Color.slateTextDim)
+                    }
+                    Spacer()
+                } else if let frame {
+                    GeometryReader { geo in
+                        Image(nsImage: frame)
+                            .resizable()
+                            .interpolation(.medium)
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: geo.size.width, height: geo.size.height)
+                            .overlay(
+                                ScreenInteraction(
+                                    onGesture: { start, end, viewSize in
+                                        sendGesture(from: start, to: end, in: viewSize)
+                                    },
+                                    onText: { text in
+                                        sendText(text)
+                                    },
+                                    onKey: { keycode in
+                                        sendKeycode(keycode)
+                                    }
+                                )
+                            )
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                    )
+                } else {
+                    Spacer()
+                    VStack(spacing: 10) {
+                        ProgressView()
+                        Text("Connecting to the phone's screen…")
+                            .font(.caption)
+                            .foregroundStyle(Color.slateTextDim)
+                    }
+                    Spacer()
                 }
-                Spacer()
-            } else if let frame {
-                GeometryReader { geo in
-                    Image(nsImage: frame)
-                        .resizable()
-                        .interpolation(.medium)
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: geo.size.width, height: geo.size.height)
-                        .overlay(
-                            ScreenInteraction { start, end, viewSize in
-                                sendGesture(from: start, to: end, in: viewSize)
-                            }
-                        )
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                )
-            } else {
-                Spacer()
-                VStack(spacing: 10) {
-                    ProgressView()
-                    Text("Connecting to the phone's screen…")
-                        .font(.caption)
-                        .foregroundStyle(Color.slateTextDim)
-                }
-                Spacer()
+
+                Text("Beta · Click screen to type · Streams over adb")
+                    .font(.system(size: 8))
+                    .foregroundStyle(Color.slateTextDim.opacity(0.7))
+                    .padding(.top, 4)
             }
+            .padding(10)
 
-            // Thin-shell navigation: only Back. Android's own home and
-            // recents have no meaning here — leaving the app returns to
-            // the native home automatically.
-            navKey(icon: "chevron.backward", key: .back, label: "Back")
-                .padding(.vertical, 4)
-
-            Text("Beta · streams a few frames per second over adb")
-                .font(.system(size: 8))
-                .foregroundStyle(Color.slateTextDim.opacity(0.7))
+            // Floating escape hatch (top-right controls)
+            if model.activeSerial != nil && frame != nil {
+                HStack(spacing: 6) {
+                    navKey(icon: "chevron.backward", key: .back, label: "Back")
+                    navKey(icon: "house", key: .home, label: "Home")
+                    navKey(icon: "square.on.square", key: .appSwitch, label: "Recents")
+                    
+                    Button {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            model.activeApp = nil
+                        }
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(Color.slateRed)
+                            .frame(width: 20, height: 20)
+                            .background(Color.white.opacity(0.08))
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Exit Screen")
+                    .accessibilityLabel("Exit Screen")
+                }
+                .padding(4)
+                .background(.ultraThinMaterial)
+                .clipShape(Capsule())
+                .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 1))
+                .padding(14)
+            }
         }
-        .padding(10)
         .task(id: model.activeSerial) {
             await streamFrames()
         }
@@ -121,10 +213,11 @@ struct ScreenAppView: View {
             }
         } label: {
             Image(systemName: icon)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(Color.white.opacity(0.75))
-                .frame(width: 40, height: 28)
-                .contentShape(Rectangle())
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.85))
+                .frame(width: 20, height: 20)
+                .background(Color.white.opacity(0.08))
+                .clipShape(Circle())
         }
         .buttonStyle(.plain)
         .help(label)
@@ -169,6 +262,20 @@ struct ScreenAppView: View {
                                                       fromX: Int(start.x), fromY: Int(start.y),
                                                       toX: Int(end.x), toY: Int(end.y))
             }
+        }
+    }
+
+    private func sendText(_ text: String) {
+        guard let serial = model.activeSerial else { return }
+        Task.detached(priority: .userInitiated) {
+            _ = EmulatorManager.shared.inputText(serial: serial, text)
+        }
+    }
+
+    private func sendKeycode(_ keycode: Int) {
+        guard let serial = model.activeSerial else { return }
+        Task.detached(priority: .userInitiated) {
+            _ = EmulatorManager.shared.inputKeyevent(serial: serial, keycode: keycode)
         }
     }
 

@@ -64,10 +64,25 @@ extension EmulatorManager {
         adb(serial, ["shell", "input", "keyevent", "\(key.rawValue)"]).ok
     }
 
-    /// Type text into the focused field (spaces handled via %s encoding).
+    /// Send a generic keyevent code.
+    @discardableResult
+    public func inputKeyevent(serial: String, keycode: Int) -> Bool {
+        adb(serial, ["shell", "input", "keyevent", "\(keycode)"]).ok
+    }
+
+    /// Type text into the focused field (spaces handled via %s encoding, metacharacters escaped).
     @discardableResult
     public func inputText(serial: String, _ text: String) -> Bool {
-        let encoded = text.replacingOccurrences(of: " ", with: "%s")
-        return adb(serial, ["shell", "input", "text", encoded]).ok
+        var escaped = ""
+        for char in text {
+            if char == " " {
+                escaped += "%s"
+            } else if "$`\"\\!*&|;<>(')".contains(char) {
+                escaped += "\\\(char)"
+            } else {
+                escaped.append(char)
+            }
+        }
+        return adb(serial, ["shell", "input", "text", escaped]).ok
     }
 }

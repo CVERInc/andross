@@ -147,6 +147,10 @@ final class AppModel: ObservableObject {
         didSet { UserDefaults.standard.set(headlessBoot, forKey: "headlessBoot") }
     }
     
+    @Published var rememberWindowPosition = UserDefaults.standard.bool(forKey: "rememberWindowPosition") {
+        didSet { UserDefaults.standard.set(rememberWindowPosition, forKey: "rememberWindowPosition") }
+    }
+    
     @Published var activeApp: ActiveApp? = nil
     
     // Default to Phone Portrait on launch
@@ -238,7 +242,6 @@ final class AppModel: ObservableObject {
     
     func refreshStorageStats() {
         Task.detached(priority: .background) {
-            let fm = FileManager.default
             let home = NSHomeDirectory()
             
             // 1. Get andross app size from its own bundle (wherever it lives)
@@ -729,44 +732,133 @@ private class CustomGlassView: NSVisualEffectView {
     // Marker class to prevent multiple wrapping
 }
 
-class ConfiguratorNSView: NSView, NSWindowDelegate {
+class ConfiguratorNSView: NSView {
     var targetWidth: CGFloat = 0
     var targetHeight: CGFloat = 0
     private var lastFrame: NSRect? = nil
     private var isMaximizedMode = false
     private var savedWindowFrame: NSRect? = nil
+    private var isFirstResize = true
+    private var isProgrammaticMove = false
+    private var isPositioningScheduled = false
+    private var isConfigured = false
+    
+    private func log(_ msg: String) {
+        NSLog("[Andross] %@", msg)
+    }
     
     func updateWindowSize(width: CGFloat, height: CGFloat) {
         self.targetWidth = width
         self.targetHeight = height
         
-        guard let window = self.window else { return }
+        guard let window = self.window else {
+            log("[WARN] updateWindowSize called but self.window is nil!")
+            return
+        }
         
-        // Avoid overriding window size if window is currently maximized
         if isMaximizedMode {
             return
         }
         
-        // Lock top-left corner during size changes!
         let currentSize = window.frame.size
+        log("[DEBUG] updateWindowSize - currentSize: \(currentSize), target: (\(width), \(height)), isFirstResize: \(isFirstResize)")
+        
+        if isFirstResize {
+            if isPositioningScheduled { return }
+            isPositioningScheduled = true
+            
+            let remember = UserDefaults.standard.bool(forKey: "rememberWindowPosition")
+            let hasSavedX = UserDefaults.standard.object(forKey: "windowLastX") != nil
+            let hasSavedTopY = UserDefaults.standard.object(forKey: "windowLastTopY") != nil
+            log("[DEBUG] isFirstResize - remember: \(remember), hasSavedX: \(hasSavedX), hasSavedTopY: \(hasSavedTopY)")
+            
+            var newFrame: NSRect
+            if remember && hasSavedX && hasSavedTopY {
+                let savedX = UserDefaults.standard.double(forKey: "windowLastX")
+                let savedTopY = UserDefaults.standard.double(forKey: "windowLastTopY")
+                let newY = savedTopY - height
+                newFrame = NSRect(x: CGFloat(savedX), y: CGFloat(newY), width: width, height: height)
+                log("[DEBUG] Restoring position to: \(newFrame)")
+            } else {
+                let screen = window.screen ?? NSScreen.main
+                let screenFrame = screen?.visibleFrame ?? .zero
+                let newX = screenFrame.origin.x + (screenFrame.size.width - width) / 2
+                let newY = screenFrame.origin.y + (screenFrame.size.height - height) / 2
+                newFrame = NSRect(x: newX, y: newY, width: width, height: height)
+                log("[DEBUG] Centering window to: \(newFrame), screenFrame: \(screenFrame)")
+            }
+            
+            self.lastFrame = newFrame
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, let window = self.window else { return }
+                self.isProgrammaticMove = true
+                window.setFrame(newFrame, display: true, animate: false)
+                self.lastFrame = newFrame
+                
+                // Smoothly fade in the window once it's correctly resized and positioned.
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.15
+                    window.animator().alphaValue = 1.0
+                }
+                
+                // Delay disabling first resize protection to allow startup layout passes to settle.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                    self?.isFirstResize = false
+                    self?.log("[DEBUG] Startup layout cooldown finished. User window tracking active.")
+                }
+                
+                DispatchQueue.main.async { [weak self] in
+                    self?.isProgrammaticMove = false
+                }
+            }
+            return
+        }
+        
         if currentSize.width != width || currentSize.height != height {
             let oldFrame = window.frame
+            // Lock top-left corner during size changes!
             let newY = oldFrame.origin.y + (oldFrame.size.height - height)
             let newFrame = NSRect(x: oldFrame.origin.x, y: newY, width: width, height: height)
+            log("[DEBUG] Locking top-left to: \(newFrame)")
+            
             self.lastFrame = newFrame
+            self.isProgrammaticMove = true
             window.setFrame(newFrame, display: true, animate: false)
+            DispatchQueue.main.async { [weak self] in
+                self?.isProgrammaticMove = false
+            }
         }
     }
     
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        configureWindow(initial: true)
-        
         guard let window = self.window else { return }
         
-        // Register delegate and store initial frame
-        window.delegate = self
+        if isConfigured {
+            log("[DEBUG] viewDidMoveToWindow called but already configured, skipping.")
+            return
+        }
+        isConfigured = true
+        
+        configureWindow(initial: true)
+        
+        // Register notifications and store initial frame
         self.lastFrame = window.frame
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleWindowDidMove),
+            name: NSWindow.didMoveNotification,
+            object: window
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleWindowDidResize),
+            name: NSWindow.didResizeNotification,
+            object: window
+        )
+        
+        // Ensure positioning and size are updated immediately when the window is available
+        updateWindowSize(width: targetWidth, height: targetHeight)
         
         // Listen to custom maximize toggle notification
         NotificationCenter.default.addObserver(
@@ -832,12 +924,20 @@ class ConfiguratorNSView: NSView, NSWindowDelegate {
         }
     }
     
-    // Delegate: Observe size changes to lock top-left corner
-    func windowDidResize(_ notification: Notification) {
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+    
+    @objc private func handleWindowDidResize(_ notification: Notification) {
         guard let window = self.window,
               let lastFrame = self.lastFrame else { return }
         
         let newFrame = window.frame
+        if isFirstResize {
+            self.lastFrame = newFrame
+            return
+        }
+        
         if newFrame.size != lastFrame.size {
             let oldTopLeftY = lastFrame.origin.y + lastFrame.size.height
             let adjustedY = oldTopLeftY - newFrame.size.height
@@ -852,18 +952,36 @@ class ConfiguratorNSView: NSView, NSWindowDelegate {
         } else {
             self.lastFrame = newFrame
         }
+        saveWindowPositionIfNeeded()
     }
     
-    // Delegate: Observe moves to update coordinates
-    func windowDidMove(_ notification: Notification) {
+    @objc private func handleWindowDidMove(_ notification: Notification) {
         if let window = self.window {
             self.lastFrame = window.frame
+            saveWindowPositionIfNeeded()
+        }
+    }
+    
+    private func saveWindowPositionIfNeeded() {
+        guard let window = self.window, !isMaximizedMode, !isFirstResize, !isProgrammaticMove else { 
+            log("[DEBUG] saveWindowPositionIfNeeded skipped - window: \(self.window != nil), isMaximized: \(isMaximizedMode), isFirstResize: \(isFirstResize), isProgrammatic: \(isProgrammaticMove)")
+            return 
+        }
+        let remember = UserDefaults.standard.bool(forKey: "rememberWindowPosition")
+        if remember {
+            let frame = window.frame
+            let topY = frame.origin.y + frame.size.height
+            UserDefaults.standard.set(Double(frame.origin.x), forKey: "windowLastX")
+            UserDefaults.standard.set(Double(topY), forKey: "windowLastTopY")
+            log("[DEBUG] Saved window position: X: \(frame.origin.x), TopY: \(topY)")
         }
     }
     
     @objc private func handleToggleMaximize() {
         self.toggleMaximize()
     }
+    
+    
     
     private func toggleMaximize() {
         guard let window = self.window,
@@ -893,10 +1011,6 @@ class ConfiguratorNSView: NSView, NSWindowDelegate {
                 window.setFrame(defaultFrame, display: true, animate: true)
             }
         }
-    }
-    
-    deinit {
-        NotificationCenter.default.removeObserver(self)
     }
     
     private func updateGlassViewStyle(isFullScreen: Bool) {
@@ -994,6 +1108,10 @@ class ConfiguratorNSView: NSView, NSWindowDelegate {
             window.hasShadow = true
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
+            window.isRestorable = false
+            window.identifier = nil
+            window.restorationClass = nil
+            window.alphaValue = 0.0 // Hide window initially to prevent flickering/visual flash
             window.center() // Center on screen on first load
         }
         
@@ -1133,7 +1251,7 @@ struct ContentView: View {
 
                             // Dock: power + the three system surfaces.
                             // Labels stay hidden until the pointer enters the dock.
-                            HStack(spacing: model.isLandscape ? 44 : 30) {
+                            HStack(spacing: model.isLandscape ? 40 : 16) {
                                 dockIcon(title: model.activeSerial != nil ? "Power Off" : "Power On",
                                          icon: "power",
                                          tint: model.activeSerial != nil ? .androidGreen : .slateTextDim,
@@ -1151,9 +1269,9 @@ struct ContentView: View {
                                 }
                             }
                             .padding(.vertical, 12)
-                            .padding(.horizontal, 22)
-                            .liquidGlassBackground(cornerRadius: 22)
-                            .padding(.bottom, 8)
+                            .padding(.horizontal, 20)
+                            .liquidGlassBackground(cornerRadius: 30)
+                            .padding(.bottom, 20)
                             .padding(.top, 6)
                             .onHover { hovering in
                                 withAnimation(.easeOut(duration: 0.16)) {
@@ -1168,21 +1286,23 @@ struct ContentView: View {
                 
                 // Bottom Android Gesture Navigation Bar Pill — a real Button so
                 // it always wins hit-testing against window-background dragging.
-                Button {
-                    withAnimation(.easeOut(duration: 0.15)) {
-                        model.activeApp = nil
+                if model.activeApp != nil {
+                    Button {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            model.activeApp = nil
+                        }
+                    } label: {
+                        Capsule()
+                            .fill(Color.white.opacity(0.35))
+                            .frame(width: 80, height: 4)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 36)
+                            .contentShape(Rectangle())
                     }
-                } label: {
-                    Capsule()
-                        .fill(Color.white.opacity(0.35))
-                        .frame(width: 80, height: 4)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 36)
-                        .contentShape(Rectangle())
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Home")
+                    .help("Back to home screen")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Home")
-                .help("Back to home screen")
             }
             .frame(width: model.currentWidth, height: model.currentHeight)
             .background(Color.slateDeep.opacity(0.2))
@@ -1415,17 +1535,17 @@ struct ContentView: View {
     private func dockIcon(title: String, icon: String, tint: Color = .androidGreen,
                           showLabel: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            VStack(spacing: 6) {
+            VStack(spacing: 7) {
                 Image(systemName: icon)
-                    .font(.system(size: 20))
+                    .font(.system(size: 24))
                     .foregroundStyle(tint)
-                    .frame(width: 44, height: 44)
+                    .frame(width: 58, height: 58)
                     .background(Color.white.opacity(0.06))
-                    .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
                 if showLabel {
                     Text(title)
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(Color.white.opacity(0.8))
                         .transition(.opacity)
                 }
@@ -1870,6 +1990,15 @@ struct SettingsAppView: View {
                         .foregroundStyle(Color.slateTextDim)
                         .toggleStyle(.checkbox)
                     Text("Beta — boots without a separate emulator window; the phone lives in the Screen view (a few frames per second).")
+                        .font(.system(size: 8))
+                        .foregroundStyle(Color.slateTextDim.opacity(0.7))
+                        .padding(.bottom, 4)
+
+                    Toggle("Remember window position", isOn: $model.rememberWindowPosition)
+                        .font(.caption2)
+                        .foregroundStyle(Color.slateTextDim)
+                        .toggleStyle(.checkbox)
+                    Text("Save and restore where you last dragged the window on your screen.")
                         .font(.system(size: 8))
                         .foregroundStyle(Color.slateTextDim.opacity(0.7))
                 }
