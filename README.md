@@ -1,46 +1,86 @@
 # 🤖 andross
 
-一個專為 macOS Apple Silicon (M1/M2/M3/M4) 使用者設計的極輕量、純淨 Android 虛擬機管理器。
-不需要實體 Android 手機，就能在 Mac 上替任何「一帳號綁一裝置」的 App（LINE、通訊軟體、遊戲⋯）多開獨立帳號，或安全測試各類 APK 檔案。
+A lightweight, native Android container for macOS on Apple Silicon (M1/M2/M3/M4).
 
-> 🚧 **狀態：規劃中（pre-code）。** 下方的特色、快速開始、開發指令描述的是**目標設計**，尚未全部實作完成；專案尚未 git init。實際交付驗證後此標記才會移除。
+andross gives you a clean Android phone that lives inside a Mac window — no
+physical device required. Use it to run isolated accounts for any app that ties
+one account to one device (LINE, messengers, games…), or to safely try out
+`.apk` files. It deliberately skips the multi-gigabyte Android Studio install
+and drives Google's official emulator engine directly through
+`Hypervisor.framework`.
 
----
-
-## ✨ 特色
-*   **極致輕巧**：完全不需要安裝幾 GB 的 Android Studio 整合開發環境，只透過 Homebrew 下載 Google 官方的核心模擬引擎。
-*   **原生硬體加速**：直接利用 macOS 的 `Hypervisor.framework`，1:1 調用 M 系列晶片效能。
-*   **身分沙盒（Sandboxes）**：用 Android 原生多使用者機制，在同一台虛擬手機裡建立多個完全隔離的身分，App 一鍵克隆、各登各的帳號。
-*   **自主權**：
-    *   可選擇安裝含有 Google Play 的版本（方便使用需要 GMS 的 App）。
-    *   可選擇 100% 純淨開源的 AOSP 版（無 Google 服務，可用 Aurora Store 安全下載 Play 商店 App）。
-    *   全空白沙盒版（僅支援手動拖放本地 APK 安裝）。
+> **Status: v0.1.0 — early, GUI-only.** The app builds and runs; core flows
+> (create device, sandboxes, install/launch apps, clean uninstall) are
+> exercised by an integration test. The in-window phone screen is a **beta**
+> (raw-frame streaming over adb). Not yet signed/notarized for distribution.
 
 ---
 
-## 🚀 快速開始
+## ✨ Features
 
-### 1. 打包 andross.app（免 Xcode）
+* **Featherweight** — no Android Studio. Just Homebrew pulling Google's official
+  command-line tools and emulator.
+* **Native acceleration** — the emulator runs on `Hypervisor.framework`,
+  mapping straight onto the M-series silicon.
+* **Sandboxes** — built on Android's native multi-user system. Create fully
+  isolated identities inside one virtual phone, clone an app into a new identity
+  with one click, and sign into each separately.
+* **Your choice of base image:**
+  * Google Play image — for apps that need Google Mobile Services.
+  * AOSP image — 100% open source, no Google services; install Play-store apps
+    via the bundled Aurora Store.
+  * Blank AOSP — local `.apk` drag-and-drop only.
+
+---
+
+## 🚀 Quick start
+
+### 1. Build andross.app (no Xcode required)
+
 ```bash
 ./scripts/build-app.sh
 ```
-完成後會在 `~/Applications/andross.app` 產生可雙擊的 App（第一次開啟若被 macOS 警告未簽章，右鍵 → 打開）。
 
-### 2. 在 App 裡完成所有事
-*   **主畫面**：顯示目前身分已安裝的 App，點一下就在虛擬手機上開啟；把 `.apk` 拖進視窗任何地方即可安裝。
-*   **Devices**（dock）：建立第一台虛擬手機（自動檢查並引導安裝 Java 與 Android 引擎）、一鍵啟動／刪除。
-*   **Sandboxes**（dock）：建立、切換、刪除隔離身分，已安裝的 App 一鍵加進新身分。
-*   **Settings**（dock）：系統狀態、空間占用、最近動態、關閉所有手機、乾淨解除安裝精靈（含 Homebrew 元件）。
+This produces a double-clickable app at `/Applications/andross.app`. On first
+launch macOS may warn it is unsigned — right-click → Open.
+
+### 2. Do everything inside the app
+
+* **Home** — shows the apps installed for the current identity; click one to
+  open it on the virtual phone. Drop an `.apk` anywhere in the window to install.
+* **Devices** (dock) — create your first virtual phone (it checks for and guides
+  you through installing Java and the Android engine), then start or delete it.
+* **Sandboxes** (dock) — create, switch, and delete isolated identities, and add
+  installed apps to a new identity in one click.
+* **Settings** (dock) — system status, disk usage, recent activity, shut down
+  all phones, and a clean-uninstall wizard (including the Homebrew components).
 
 ---
 
-## 🛠 開發
+## 🛠 Development
+
 ```bash
-./scripts/test.sh              # 建置 + 單元測試（零依賴 runner）
-./scripts/test.sh integration  # 真的 headless 開機一台 AVD，走完身分生命週期（需已建 AVD，耗時數分鐘）
-./scripts/make-icon.sh         # 重新產生 App icon（assets/andross.icns）
+./scripts/test.sh              # release build + unit tests (zero-dependency runner)
+./scripts/test.sh integration  # boots a real AVD headless and walks the
+                               # identity lifecycle (needs SDK + an existing AVD)
+./scripts/make-icon.sh         # regenerate the app icon (assets/andross.icns)
 ```
 
-## 📌 誠實邊界
-*   LINE 等服務註冊**仍需要一個可收驗證的電話號碼**——andross 省掉的是「多一支手機」，不是「電話號碼」。
-*   LINE 一個帳號同時只能登入一支手機裝置；andross 適合經營**新的／副的**帳號，不是把現有手機帳號搬過來。
+CI runs `./scripts/test.sh` on every push and pull request.
+
+---
+
+## 📌 Honest boundaries
+
+* Registering for services like LINE **still requires a phone number that can
+  receive a verification code** — andross removes the need for an extra
+  *handset*, not the phone number itself.
+* LINE allows only one logged-in device per account. andross is for running
+  **new/secondary** accounts, not for migrating an account off your existing
+  phone.
+
+---
+
+## License
+
+MIT © CVER Inc. See [LICENSE](LICENSE).
