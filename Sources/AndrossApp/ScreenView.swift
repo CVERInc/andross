@@ -290,23 +290,39 @@ struct ScreenAppView: View {
             EmulatorManager.shared.defaultLauncherPackage(serial: serial)
         }.value
 
+        let stream = EmulatorManager.shared.streamScreen(serial: serial)
         var frameCount = 0
-        while !Task.isCancelled {
-            let data = await Task.detached(priority: .userInitiated) {
-                EmulatorManager.shared.captureScreen(serial: serial)
-            }.value
 
-            if !Task.isCancelled, let data, let image = NSImage(data: data) {
-                if let rep = NSBitmapImageRep(data: data) {
-                    devicePixels = CGSize(width: rep.pixelsWide, height: rep.pixelsHigh)
-                }
-                frame = image
+        for await frameData in stream {
+            if Task.isCancelled { break }
+
+            let width = frameData.width
+            let height = frameData.height
+            let pixelData = frameData.pixelData
+
+            if let provider = CGDataProvider(data: pixelData as CFData),
+               let cgImage = CGImage(
+                   width: width,
+                   height: height,
+                   bitsPerComponent: 8,
+                   bitsPerPixel: 32,
+                   bytesPerRow: width * 4,
+                   space: CGColorSpaceCreateDeviceRGB(),
+                   bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                   provider: provider,
+                   decode: nil,
+                   shouldInterpolate: true,
+                   intent: .defaultIntent
+               ) {
+                let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: width, height: height))
+                devicePixels = CGSize(width: width, height: height)
+                frame = nsImage
             }
 
             frameCount += 1
             // Don't check during the first few seconds — an app we just
             // launched may still be cold-starting behind the launcher.
-            if let launcher, frameCount >= 9, frameCount % 3 == 0 {
+            if let launcher, frameCount >= 9, frameCount % 5 == 0 {
                 let foreground = await Task.detached(priority: .userInitiated) {
                     EmulatorManager.shared.foregroundPackage(serial: serial)
                 }.value
@@ -317,8 +333,6 @@ struct ScreenAppView: View {
                     return
                 }
             }
-
-            try? await Task.sleep(nanoseconds: 120_000_000)
         }
     }
 }

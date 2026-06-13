@@ -508,6 +508,48 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Toggle headed/headless mode and reboot the phone if running.
+    func toggleHeadedHeadless() {
+        guard let name = activeSerial != nil ? (activeDeviceName.isEmpty ? (selectedAVD ?? avds.first) : activeDeviceName) : (selectedAVD ?? avds.first) else { return }
+        let serial = activeSerial
+        
+        headlessBoot.toggle()
+        let targetHeadless = headlessBoot // Capture on the MainActor to prevent isolation compilation error
+        
+        if serial != nil {
+            log("Rebooting [\(name)] in \(targetHeadless ? "embedded" : "windowed") mode...")
+            Task.detached(priority: .userInitiated) {
+                _ = EmulatorManager.shared.stopAll()
+                
+                var retries = 0
+                while EmulatorManager.shared.connectedEmulators().count > 0 && retries < 20 {
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    retries += 1
+                }
+                
+                let ok = EmulatorManager.shared.startAVD(name: name, headless: targetHeadless)
+                
+                await MainActor.run {
+                    if ok {
+                        self.log(targetHeadless
+                            ? "Boot started — the phone will live in the Screen view."
+                            : "Boot started — your apps will appear once the phone is up.")
+                        if targetHeadless {
+                            self.openScreen()
+                        } else {
+                            self.activeApp = nil
+                        }
+                    } else {
+                        self.log("Failed to reboot the phone.")
+                    }
+                    self.refreshIdentities()
+                }
+            }
+        } else {
+            log("Configured phone boot mode to \(targetHeadless ? "embedded" : "windowed").")
+        }
+    }
+
     func launchApp(packageName: String) {
         guard let serial = activeSerial else { return }
         log("Opening \(AppCatalog.displayName(for: packageName)) on \(activeDeviceName)…")
@@ -1418,6 +1460,13 @@ struct ContentView: View {
                 .padding(.top, 34)
                 .transaction { $0.animation = nil }
         }
+        // Trailing controls (Screen Toggle and Detach/Eject) opposite the traffic lights
+        .overlay(alignment: .topTrailing) {
+            trailingControls
+                .padding(.trailing, 36)
+                .padding(.top, 29)
+                .transaction { $0.animation = nil }
+        }
         // Create Device Sheet
         .sheet(isPresented: $showCreateSheet) {
             VStack(spacing: 16) {
@@ -1504,6 +1553,49 @@ struct ContentView: View {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // Trailing controls: Screen View toggle & Window Detach/Eject button
+    private var trailingControls: some View {
+        HStack(spacing: 8) {
+            if model.activeSerial != nil {
+                // 1. Toggle Screen View button
+                Button {
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        if model.activeApp == .screen {
+                            model.activeApp = nil
+                        } else {
+                            model.openScreen()
+                        }
+                    }
+                } label: {
+                    Image(systemName: model.activeApp == .screen ? "iphone.slash" : "play.display")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(model.activeApp == .screen ? Color.androidGreen : Color.white.opacity(0.85))
+                        .frame(width: 22, height: 22)
+                        .background(Color.white.opacity(0.08))
+                        .clipShape(Circle())
+                        .overlay(Circle().stroke(Color.white.opacity(0.12), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .help(model.activeApp == .screen ? "Close Screen View" : "Open Screen View")
+
+                // 2. Detach/Eject button
+                Button {
+                    model.toggleHeadedHeadless()
+                } label: {
+                    Image(systemName: model.headlessBoot ? "arrow.up.right.square" : "arrow.down.left.square")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.85))
+                        .frame(width: 22, height: 22)
+                        .background(Color.white.opacity(0.08))
+                        .clipShape(Circle())
+                        .overlay(Circle().stroke(Color.white.opacity(0.12), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .help(model.headlessBoot ? "Pop Out Phone Window" : "Embed Phone Window")
             }
         }
     }

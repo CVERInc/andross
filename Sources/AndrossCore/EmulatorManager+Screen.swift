@@ -28,11 +28,8 @@ extension EmulatorManager {
     /// Grab one PNG frame of the device's screen. Returns nil while the
     /// device is still booting or when capture fails.
     public func captureScreen(serial: String) -> Data? {
-        let (status, data) = Shell.runData([adbPath, "-s", serial, "exec-out", "screencap", "-p"])
-        guard status == 0, data.count > 8 else { return nil }
-        // PNG magic: 89 50 4E 47
-        let magic: [UInt8] = [0x89, 0x50, 0x4E, 0x47]
-        guard data.prefix(4).elementsEqual(magic) else { return nil }
+        let (status, data) = Shell.runData([adbPath, "-s", serial, "exec-out", "screencap"])
+        guard status == 0, data.count > 12 else { return nil }
         return data
     }
 
@@ -84,5 +81,83 @@ extension EmulatorManager {
             }
         }
         return adb(serial, ["shell", "input", "text", escaped]).ok
+    }
+
+    public struct ScreenFrame: Sendable {
+        public let width: Int
+        public let height: Int
+        public let pixelData: Data
+    }
+
+    /// Stream screen frames asynchronously from a persistent ADB shell loop.
+    /// Spawns exactly one ADB process and streams raw RGBA frames at ~60 FPS.
+    public func streamScreen(serial: String) -> AsyncStream<ScreenFrame> {
+        AsyncStream { continuation in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = [adbPath, "-s", serial, "exec-out", "while true; do screencap; usleep 16666; done"]
+            
+            var env = ProcessInfo.processInfo.environment
+            env["PATH"] = (env["PATH"] ?? "") + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+            process.environment = env
+
+            let outPipe = Pipe()
+            process.standardOutput = outPipe
+            process.standardError = Pipe()
+
+            do {
+                try process.run()
+            } catch {
+                continuation.finish()
+                return
+            }
+
+            continuation.onTermination = { @Sendable _ in
+                if process.isRunning {
+                    process.terminate()
+                }
+            }
+
+            Task.detached(priority: .userInitiated) {
+                let fileHandle = outPipe.fileHandleForReading
+                
+                func readExactly(count: Int) -> Data? {
+                    var buffer = Data()
+                    while buffer.count < count {
+                        let needed = count - buffer.count
+                        do {
+                            guard let chunk = try fileHandle.read(upToCount: needed), !chunk.isEmpty else {
+                                return nil
+                            }
+                            buffer.append(chunk)
+                        } catch {
+                            return nil
+                        }
+                    }
+                    return buffer
+                }
+
+                while process.isRunning {
+                    guard let header = readExactly(count: 12) else { break }
+                    let w = header.withUnsafeBytes { $0.load(fromByteOffset: 0, as: UInt32.self) }
+                    let h = header.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt32.self) }
+                    let width = Int(w)
+                    let height = Int(h)
+
+                    guard width > 0, height > 0 else { break }
+
+                    let pixelBytes = width * height * 4
+                    guard let pixelData = readExactly(count: pixelBytes) else { break }
+
+                    let frame = ScreenFrame(width: width, height: height, pixelData: pixelData)
+                    continuation.yield(frame)
+                }
+
+                if process.isRunning {
+                    process.terminate()
+                }
+                continuation.finish()
+            }
+        }
     }
 }
