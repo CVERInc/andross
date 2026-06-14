@@ -2,26 +2,10 @@ import SwiftUI
 import AppKit
 import AndrossCore
 import UniformTypeIdentifiers
+import Signet
 
-// Extend Color to support hex colors and Android Green theme
-extension Color {
-    init(hex: UInt, alpha: Double = 1.0) {
-        self.init(
-            .sRGB,
-            red: Double((hex >> 16) & 0xff) / 255,
-            green: Double((hex >> 8) & 0xff) / 255,
-            blue: Double((hex >> 0) & 0xff) / 255,
-            opacity: alpha
-        )
-    }
-    
-    static let androidGreen = Color(hex: 0x3DDC84)
-    static let slateDeep = Color(hex: 0x12171A)
-    static let slateGround = Color(hex: 0x1A2225)
-    static let slateBorder = Color(hex: 0x2A353A)
-    static let slateTextDim = Color(hex: 0x8C9C9E)
-    static let slateRed = Color(hex: 0xFF5F56)
-}
+// The android-green / slate palette and Color(hex:) now come from Signet
+// (the shared design system); andross's values live there as AndrossTheme.
 
 extension View {
     func liquidGlassBackground(cornerRadius: CGFloat = 8, customBorderColor: Color? = nil) -> some View {
@@ -70,6 +54,7 @@ struct AndrossApp: App {
             ContentView()
                 .preferredColorScheme(.dark)
                 .tint(.androidGreen)
+                .cverTheme(AndrossTheme())
                 .background(Color.clear)
                 // SwiftUI lifecycle delivers Finder-opened documents here,
                 // not to the app delegate's open-urls callback.

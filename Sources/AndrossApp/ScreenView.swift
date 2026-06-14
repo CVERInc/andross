@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import AndrossCore
+import Signet
 
 /// AppKit interaction layer for the embedded screen. A plain SwiftUI gesture
 /// can't be used here: the window is movable-by-background, and a mouse-down

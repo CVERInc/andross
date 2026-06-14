@@ -8,11 +8,19 @@ let package = Package(
         .library(name: "AndrossCore", targets: ["AndrossCore"]),
         .executable(name: "AndrossApp", targets: ["AndrossApp"]),
     ],
+    dependencies: [
+        // Signet — CVER's shared design system. andross supplies AndrossTheme;
+        // the palette/Color(hex:) now single-source from here. Pinned to main.
+        .package(url: "https://github.com/CVERInc/signet", branch: "main"),
+    ],
     targets: [
         // Core business logic: handles Android SDK, AVD lifecycle, and ADB communication.
         .target(name: "AndrossCore"),
         // Native macOS SwiftUI app interface.
-        .executableTarget(name: "AndrossApp", dependencies: ["AndrossCore"]),
+        .executableTarget(name: "AndrossApp", dependencies: [
+            "AndrossCore",
+            .product(name: "Signet", package: "signet"),
+        ]),
         // Test harnesses (./scripts/test.sh) — not product CLIs. Plain
         // executables because Command Line Tools ship no XCTest/Testing.
         .executableTarget(name: "AndrossUnitTests", dependencies: ["AndrossCore"]),
