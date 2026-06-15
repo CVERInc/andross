@@ -8,6 +8,44 @@ public final class EmulatorManager: Sendable {
 
     private init() {}
 
+    // MARK: - Spawned-process registry
+    //
+    // An emulator that is still booting has NOT yet registered with adb, so
+    // `stopAll()` (which only sees adb-visible serials) cannot kill it — the
+    // user presses "stop" and an orphan emulator keeps booting in the
+    // background. We therefore keep weak-ish handles to every emulator process
+    // we spawn, so a stop can also terminate boots that are still in flight.
+    private let liveProcessesLock = NSLock()
+    nonisolated(unsafe) private var _liveProcesses: [Process] = []
+
+    private func registerSpawned(_ process: Process) {
+        liveProcessesLock.lock()
+        defer { liveProcessesLock.unlock() }
+        _liveProcesses = ProcessRegistry.pruned(_liveProcesses)
+        _liveProcesses.append(process)
+    }
+
+    /// Terminate (SIGTERM) every emulator process we spawned that is still
+    /// running, and drop dead handles. Returns the number signalled. This is
+    /// the half of shutdown that reaches boots adb can't see yet.
+    @discardableResult
+    public func terminateSpawnedProcesses() -> Int {
+        liveProcessesLock.lock()
+        defer { liveProcessesLock.unlock() }
+        let signalled = ProcessRegistry.terminateRunning(_liveProcesses)
+        _liveProcesses = ProcessRegistry.pruned(_liveProcesses)
+        return signalled
+    }
+
+    /// Number of spawned emulator processes still running (after pruning dead
+    /// handles). Useful for shutdown bookkeeping and status display.
+    public var liveSpawnedCount: Int {
+        liveProcessesLock.lock()
+        defer { liveProcessesLock.unlock() }
+        _liveProcesses = ProcessRegistry.pruned(_liveProcesses)
+        return _liveProcesses.count
+    }
+
     // MARK: - Tool resolution
     //
     // The cask only symlinks avdmanager/sdkmanager into /opt/homebrew/bin.
@@ -286,6 +324,7 @@ public final class EmulatorManager: Sendable {
         } catch {
             return false
         }
+        registerSpawned(process)
 
         // If a pending Aurora Store APK exists, install it once the device boots.
         let tmpDir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".andross_tmp")
@@ -302,13 +341,20 @@ public final class EmulatorManager: Sendable {
     }
 
     /// Gracefully terminate all running emulator instances.
-    /// - Returns: Number of emulators that were asked to shut down.
+    ///
+    /// Asks every adb-visible emulator to quit (`emu kill`), then also
+    /// terminates any emulator process we spawned that is still booting and so
+    /// hasn't registered with adb yet — without this an in-flight boot would
+    /// survive a "stop" as an orphan. The two sets overlap for booted devices;
+    /// a doubled terminate on an already-quitting process is harmless.
+    /// - Returns: Number of adb-visible emulators that were asked to shut down.
     @discardableResult
     public func stopAll() -> Int {
         let serials = connectedEmulators()
         for serial in serials {
             adb(serial, ["emu", "kill"])
         }
+        terminateSpawnedProcesses()
         return serials.count
     }
 
@@ -381,5 +427,26 @@ public final class EmulatorManager: Sendable {
     public func getFileSize(path: String) -> Int64 {
         let attrs = try? FileManager.default.attributesOfItem(atPath: path)
         return attrs?[.size] as? Int64 ?? 0
+    }
+}
+
+/// Pure bookkeeping for the spawned-emulator-process registry, split out so
+/// the keep/terminate logic can be unit-tested with real (non-emulator)
+/// processes and without touching the shared singleton's lock.
+public enum ProcessRegistry {
+    /// Drop handles to processes that are no longer running.
+    public static func pruned(_ processes: [Process]) -> [Process] {
+        processes.filter { $0.isRunning }
+    }
+
+    /// SIGTERM every still-running process; return how many were signalled.
+    @discardableResult
+    public static func terminateRunning(_ processes: [Process]) -> Int {
+        var signalled = 0
+        for process in processes where process.isRunning {
+            process.terminate()
+            signalled += 1
+        }
+        return signalled
     }
 }
