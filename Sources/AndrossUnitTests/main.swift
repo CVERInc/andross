@@ -182,6 +182,127 @@ expect(EmulatorManager.supportedAPILevels.contains(EmulatorManager.defaultAPILev
 expect(AppCatalog.androidVersionName(apiLevel: 34).contains("Android 14"), "API 34 labelled Android 14")
 expectEqual(AppCatalog.androidVersionName(apiLevel: 99), "API 99", "unknown API level falls back to raw")
 
+// MARK: lsFileSize — robustness vs numeric filenames & malformed rows
+
+// A purely numeric filename must NOT be mistaken for the size column.
+expectEqual(AndrossParse.lsFileSize(from: "-rw-r--r-- 1 system system 123 2026-06-13 10:00 999999"),
+            123, "lsFileSize ignores a numeric filename, takes the real size")
+// Directory rows (leading 'd') still parse their size column.
+expectEqual(AndrossParse.lsFileSize(from: "drwxr-xr-x 2 root root 4096 2026-06-13 10:00 cache"),
+            4096, "lsFileSize parses a directory row")
+// Error/garbage rows that contain digits must not yield a phantom size.
+expectEqual(AndrossParse.lsFileSize(from: "ls: /data/app/100: No such file or directory"),
+            nil, "lsFileSize nil on an error row even with digits present")
+expectEqual(AndrossParse.lsFileSize(from: "totally bogus 42 line"),
+            nil, "lsFileSize nil when no valid mode column leads the row")
+// Multi-line: skip the error line, parse the good one.
+expectEqual(AndrossParse.lsFileSize(from: "ls: x: error\n-rw-r--r-- 1 a b 555 2026-06-13 10:00 base.apk"),
+            555, "lsFileSize finds the valid row among noise")
+
+// MARK: screencapHeader — malformed / overflow guards
+
+let goodHeader: [UInt8] = {
+    var h = [UInt8](repeating: 0, count: 12)
+    // width = 1080, height = 2400, little-endian
+    let w: UInt32 = 1080, hh: UInt32 = 2400
+    for i in 0..<4 { h[i] = UInt8((w >> (8 * UInt32(i))) & 0xFF) }
+    for i in 0..<4 { h[4 + i] = UInt8((hh >> (8 * UInt32(i))) & 0xFF) }
+    return h
+}()
+let parsedHeader = AndrossParse.screencapHeader(from: goodHeader)
+expect(parsedHeader?.width == 1080 && parsedHeader?.height == 2400, "screencapHeader parses a real frame")
+expectEqual(parsedHeader?.pixelByteCount, 1080 * 2400 * 4, "screencapHeader computes RGBA byte count")
+expectEqual(AndrossParse.screencapHeader(from: [UInt8](repeating: 0, count: 11)), nil,
+            "screencapHeader nil on a short header")
+expectEqual(AndrossParse.screencapHeader(from: [UInt8](repeating: 0, count: 12)), nil,
+            "screencapHeader nil on a zero (still-booting) header")
+// All-0xFF → width/height = 0xFFFFFFFF; must be rejected, not overflow Int.
+expectEqual(AndrossParse.screencapHeader(from: [UInt8](repeating: 0xFF, count: 12)), nil,
+            "screencapHeader rejects an implausibly huge header without overflowing")
+// Exactly at the ceiling is allowed; one past is rejected.
+func headerFor(width: UInt32, height: UInt32) -> [UInt8] {
+    var h = [UInt8](repeating: 0, count: 12)
+    for i in 0..<4 { h[i] = UInt8((width >> (8 * UInt32(i))) & 0xFF) }
+    for i in 0..<4 { h[4 + i] = UInt8((height >> (8 * UInt32(i))) & 0xFF) }
+    return h
+}
+let maxDim = UInt32(AndrossParse.maxScreencapDimension)
+expect(AndrossParse.screencapHeader(from: headerFor(width: maxDim, height: maxDim)) != nil,
+       "screencapHeader allows the max supported dimension")
+expectEqual(AndrossParse.screencapHeader(from: headerFor(width: maxDim + 1, height: 1)), nil,
+            "screencapHeader rejects one pixel past the ceiling")
+
+// MARK: clampedWindowFrame — restore stays on-screen
+
+let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
+// Fully on-screen frame is returned unchanged.
+expectEqual(clampedWindowFrame(CGRect(x: 100, y: 100, width: 360, height: 800), visibleFrame: screen),
+            CGRect(x: 100, y: 100, width: 360, height: 800), "clampedWindowFrame leaves an on-screen frame alone")
+// Off to the right slides back so the whole frame fits.
+expectEqual(clampedWindowFrame(CGRect(x: 5000, y: 100, width: 360, height: 800), visibleFrame: screen),
+            CGRect(x: 1080, y: 100, width: 360, height: 800), "clampedWindowFrame pulls an off-right frame back in")
+// Negative origin (off the left/bottom) is clamped to the screen minimum.
+expectEqual(clampedWindowFrame(CGRect(x: -500, y: -500, width: 360, height: 800), visibleFrame: screen),
+            CGRect(x: 0, y: 0, width: 360, height: 800), "clampedWindowFrame clamps a negative origin")
+// A window larger than the screen is shrunk to fit and pinned to the origin.
+expectEqual(clampedWindowFrame(CGRect(x: 200, y: 200, width: 2000, height: 2000), visibleFrame: screen),
+            CGRect(x: 0, y: 0, width: 1440, height: 900), "clampedWindowFrame shrinks an oversized window")
+// A visibleFrame with a non-zero origin (secondary display / menu bar inset).
+let offsetScreen = CGRect(x: 1440, y: 25, width: 1440, height: 875)
+expectEqual(clampedWindowFrame(CGRect(x: 0, y: 0, width: 360, height: 800), visibleFrame: offsetScreen),
+            CGRect(x: 1440, y: 25, width: 360, height: 800), "clampedWindowFrame respects a non-zero screen origin")
+
+// MARK: gesture coordinate mapping (fittedDeviceRect / devicePoint)
+
+// Portrait phone (1080×2400) inside a wide 800×600 container → pillar-boxed.
+let dev = CGSize(width: 1080, height: 2400)
+let fitted = fittedDeviceRect(devicePixels: dev, container: CGSize(width: 800, height: 600))
+// scale = min(800/1080, 600/2400) = 0.25 → 270×600, centred horizontally.
+expect(abs(fitted.width - 270) < 0.001 && abs(fitted.height - 600) < 0.001, "fittedDeviceRect scales to fit")
+expect(abs(fitted.minX - 265) < 0.001 && abs(fitted.minY - 0) < 0.001, "fittedDeviceRect centres the letterbox")
+// Centre of the fitted rect maps to the centre of the device.
+let centre = devicePoint(CGPoint(x: fitted.midX, y: fitted.midY), fitted: fitted, devicePixels: dev)
+expect(centre != nil && abs(centre!.x - 540) < 0.001 && abs(centre!.y - 1200) < 0.001,
+       "devicePoint maps the centre to device centre")
+// Top-left corner of the fitted rect → device (0,0).
+let corner = devicePoint(CGPoint(x: fitted.minX, y: fitted.minY), fitted: fitted, devicePixels: dev)
+expect(corner != nil && abs(corner!.x) < 0.001 && abs(corner!.y) < 0.001, "devicePoint maps the corner to (0,0)")
+// A tap in the pillar-box margin (left of the fitted rect) is rejected, not clamped.
+expectEqual(devicePoint(CGPoint(x: 10, y: 300), fitted: fitted, devicePixels: dev), nil,
+            "devicePoint rejects a tap in the letterbox margin")
+// Degenerate inputs never crash or divide by zero.
+expectEqual(fittedDeviceRect(devicePixels: .zero, container: CGSize(width: 800, height: 600)), .zero,
+            "fittedDeviceRect zero on zero device size")
+expectEqual(devicePoint(.zero, fitted: .zero, devicePixels: dev), nil,
+            "devicePoint nil on an empty fitted rect")
+
+// MARK: ProcessRegistry — concurrent boot+stop bookkeeping
+
+do {
+    func sleeper(_ seconds: String) -> Process {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        p.arguments = [seconds]
+        try? p.run()
+        return p
+    }
+    let p1 = sleeper("30")
+    let p2 = sleeper("30")
+    // A short-lived process we let finish, to prove pruning drops dead handles.
+    let dead = Process()
+    dead.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+    try? dead.run()
+    dead.waitUntilExit()
+
+    expectEqual(ProcessRegistry.pruned([p1, p2, dead]).count, 2,
+                "ProcessRegistry.pruned drops finished processes")
+    let signalled = ProcessRegistry.terminateRunning([p1, p2, dead])
+    expectEqual(signalled, 2, "ProcessRegistry.terminateRunning signals only the live ones")
+    p1.waitUntilExit(); p2.waitUntilExit()
+    expectEqual(ProcessRegistry.pruned([p1, p2]).count, 0,
+                "ProcessRegistry.pruned is empty after terminate+reap")
+}
+
 // MARK: result
 
 if failures > 0 {
