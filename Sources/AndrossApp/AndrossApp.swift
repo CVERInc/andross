@@ -767,7 +767,12 @@ class ConfiguratorNSView: NSView {
                 let savedX = UserDefaults.standard.double(forKey: "windowLastX")
                 let savedTopY = UserDefaults.standard.double(forKey: "windowLastTopY")
                 let newY = savedTopY - height
-                newFrame = NSRect(x: CGFloat(savedX), y: CGFloat(newY), width: width, height: height)
+                let restored = NSRect(x: CGFloat(savedX), y: CGFloat(newY), width: width, height: height)
+                // Guard against a saved position that now lands off-screen
+                // (display unplugged / resolution change) — otherwise the
+                // window restores somewhere the user can't reach it.
+                let visible = (window.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+                newFrame = clampedWindowFrame(restored, visibleFrame: visible)
             } else {
                 let screen = window.screen ?? NSScreen.main
                 let screenFrame = screen?.visibleFrame ?? .zero

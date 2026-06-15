@@ -225,32 +225,13 @@ struct ScreenAppView: View {
         .accessibilityLabel(label)
     }
 
-    /// Aspect-fit rect of the device frame inside the available space.
-    private func fittedRect(in container: CGSize) -> CGRect {
-        guard devicePixels.width > 0, devicePixels.height > 0,
-              container.width > 0, container.height > 0 else { return .zero }
-        let scale = min(container.width / devicePixels.width,
-                        container.height / devicePixels.height)
-        let size = CGSize(width: devicePixels.width * scale,
-                          height: devicePixels.height * scale)
-        return CGRect(x: (container.width - size.width) / 2,
-                      y: (container.height - size.height) / 2,
-                      width: size.width, height: size.height)
-    }
-
-    private func devicePoint(_ p: CGPoint, fitted: CGRect) -> CGPoint? {
-        guard fitted.width > 0 else { return nil }
-        let relX = (p.x - fitted.minX) / fitted.width
-        let relY = (p.y - fitted.minY) / fitted.height
-        guard (0...1).contains(relX), (0...1).contains(relY) else { return nil }
-        return CGPoint(x: relX * devicePixels.width, y: relY * devicePixels.height)
-    }
-
     private func sendGesture(from startView: CGPoint, to endView: CGPoint, in viewSize: CGSize) {
-        let fitted = fittedRect(in: viewSize)
+        // Coordinate mapping lives in AndrossCore (unit-tested) so the view and
+        // the tests share one implementation and can't drift.
+        let fitted = fittedDeviceRect(devicePixels: devicePixels, container: viewSize)
         guard let serial = model.activeSerial,
-              let start = devicePoint(startView, fitted: fitted) else { return }
-        let end = devicePoint(endView, fitted: fitted) ?? start
+              let start = devicePoint(startView, fitted: fitted, devicePixels: devicePixels) else { return }
+        let end = devicePoint(endView, fitted: fitted, devicePixels: devicePixels) ?? start
 
         let dx = end.x - start.x, dy = end.y - start.y
         let isTap = (dx * dx + dy * dy).squareRoot() < 10
