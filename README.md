@@ -60,13 +60,42 @@ launch macOS may warn it is unsigned — right-click → Open.
 ## 🛠 Development
 
 ```bash
-./scripts/test.sh              # release build + unit tests (zero-dependency runner)
+./scripts/test.sh              # hermetic preflight + release build + unit tests
 ./scripts/test.sh integration  # boots a real AVD headless and walks the
                                # identity lifecycle (needs SDK + an existing AVD)
+./scripts/check-hermetic.sh    # build-prerequisite preflight (run on a new Mac)
 ./scripts/make-icon.sh         # regenerate the app icon (assets/andross.icns)
 ```
 
 CI runs `./scripts/test.sh` on every push and pull request.
+
+### Reproducible build on a fresh Apple-silicon Mac
+
+andross builds from a clean checkout with **no Xcode and no Android Studio** —
+only Apple's Command Line Tools. The build is reproducible because the single
+external dependency (the [Signet](https://github.com/CVERInc/signet) design
+system) is pinned to a fixed revision in `Package.resolved`; SwiftPM resolves
+that exact commit rather than whatever `main` happens to be.
+
+Prerequisites on a brand-new machine:
+
+1. **Apple silicon (arm64).** The emulator runs on `Hypervisor.framework` and
+   maps onto M-series silicon.
+2. **Command Line Tools** — `xcode-select --install` (provides `swift`). Full
+   Xcode is *not* required.
+3. **Network, once.** The first build fetches the pinned Signet revision from
+   GitHub into `.build/checkouts/`. After that the build is offline-capable.
+
+Verify all three before building:
+
+```bash
+./scripts/check-hermetic.sh    # exits non-zero if a prerequisite is missing
+./scripts/build-app.sh         # → /Applications/andross.app
+```
+
+The Android engine itself (Google's `emulator` + `platform-tools`) is **not** a
+build dependency — the app installs it for you at runtime via Homebrew the first
+time you create a device, so it is never baked into the build.
 
 ---
 

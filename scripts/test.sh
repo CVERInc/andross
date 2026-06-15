@@ -9,6 +9,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Hermetic-build preflight. Guarded: it only fails on a missing *required*
+# prerequisite (arch/toolchain/pin) and degrades to a skip when offline, so it
+# is safe to gate every build on it — including in CI.
+echo "▸ hermetic preflight"
+./scripts/check-hermetic.sh
+
 echo "▸ swift build -c release"
 swift build -c release
 
