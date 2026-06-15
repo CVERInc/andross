@@ -139,18 +139,12 @@ extension EmulatorManager {
                 }
 
                 while process.isRunning {
-                    guard let header = readExactly(count: 12) else { break }
-                    let w = header.withUnsafeBytes { $0.load(fromByteOffset: 0, as: UInt32.self) }
-                    let h = header.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt32.self) }
-                    let width = Int(w)
-                    let height = Int(h)
+                    guard let headerData = readExactly(count: 12),
+                          let header = AndrossParse.screencapHeader(from: [UInt8](headerData)) else { break }
 
-                    guard width > 0, height > 0 else { break }
+                    guard let pixelData = readExactly(count: header.pixelByteCount) else { break }
 
-                    let pixelBytes = width * height * 4
-                    guard let pixelData = readExactly(count: pixelBytes) else { break }
-
-                    let frame = ScreenFrame(width: width, height: height, pixelData: pixelData)
+                    let frame = ScreenFrame(width: header.width, height: header.height, pixelData: pixelData)
                     continuation.yield(frame)
                 }
 

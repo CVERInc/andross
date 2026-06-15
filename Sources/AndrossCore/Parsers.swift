@@ -90,15 +90,29 @@ public enum AndrossParse {
     /// Parse `ls -l <file>` output into the file size column, if present.
     public static func lsFileSize(from output: String) -> Int64? {
         // `ls -l` on Android: -rw-r--r-- 1 system system 123456 2026-06-13 10:00 base.apk
-        // The hard-link count is also numeric, so take the LAST parseable
-        // number — the size column comes after it, and the date/time tokens
-        // contain '-'/':' so they never parse as integers.
-        let parts = output.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
-        var size: Int64? = nil
-        for part in parts {
-            if let bytes = Int64(part), bytes >= 0 { size = bytes }
+        // The size column sits between the link/owner columns and the
+        // date/time stamp. A filename can itself be purely numeric (e.g.
+        // `.../999999`), so we must NOT just take the last integer — that
+        // would return the name. The date token always contains '-' and the
+        // time ':', so we take the LAST integer that appears *before* the
+        // first date/time-shaped token on the line.
+        for line in output.components(separatedBy: .newlines) {
+            let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
+                .map(String.init)
+            // Only trust well-formed long-listing rows. A real row leads with
+            // a 10-char mode string (e.g. "-rw-r--r--"); error rows ("ls: …")
+            // and bare output never match, so they correctly yield nil.
+            guard let mode = parts.first, mode.count >= 10,
+                  "-dlpcbs".contains(mode.first!) else { continue }
+            var size: Int64? = nil
+            for part in parts.dropFirst() {
+                // Stop at the date/time stamp.
+                if part.contains("-") || part.contains(":") { break }
+                if let bytes = Int64(part), bytes >= 0 { size = bytes }
+            }
+            if let size { return size }
         }
-        return size
+        return nil
     }
 
     /// Parse `getprop sys.boot_completed` output ("1" when fully booted).
@@ -135,5 +149,42 @@ public enum AndrossParse {
         guard let component = resolvedComponent(from: output) else { return nil }
         let package = component.split(separator: "/").first.map(String.init)
         return (package?.isEmpty == false) ? package : nil
+    }
+
+    /// A validated `screencap` raw-frame header.
+    public struct ScreencapHeader: Equatable, Sendable {
+        public let width: Int
+        public let height: Int
+        /// Number of RGBA bytes that should follow the 12-byte header.
+        public let pixelByteCount: Int
+    }
+
+    /// Largest frame we will trust from a `screencap` header. A booting or
+    /// misbehaving device can emit garbage where the header should be; without
+    /// a ceiling `width * height * 4` overflows `Int` (crash) or asks us to
+    /// buffer gigabytes. 16384×16384 RGBA ≈ 1 GiB — comfortably above any real
+    /// phone/tablet panel, so anything larger is corruption, not a frame.
+    public static let maxScreencapDimension = 16384
+
+    /// Parse the 12-byte little-endian `screencap` header (width, height,
+    /// pixel-format) and validate it. Returns nil — never crashes or overflows
+    /// — when the bytes are short, zero, or implausibly large. Byte-wise decode
+    /// avoids the alignment requirement of `load(as: UInt32.self)`, which is
+    /// undefined behaviour on the unaligned `Data` a pipe hands back.
+    public static func screencapHeader(from header: [UInt8]) -> ScreencapHeader? {
+        guard header.count >= 12 else { return nil }
+        func u32(_ offset: Int) -> Int {
+            Int(header[offset])
+                | Int(header[offset + 1]) << 8
+                | Int(header[offset + 2]) << 16
+                | Int(header[offset + 3]) << 24
+        }
+        let width = u32(0)
+        let height = u32(4)
+        guard width > 0, height > 0,
+              width <= maxScreencapDimension, height <= maxScreencapDimension else { return nil }
+        // width/height are each ≤ 16384, so width * height * 4 ≤ ~1.07e9 —
+        // fits an Int with no overflow risk on any supported platform.
+        return ScreencapHeader(width: width, height: height, pixelByteCount: width * height * 4)
     }
 }
