@@ -43,6 +43,20 @@ final class AndrossAppDelegate: NSObject, NSApplicationDelegate {
         }
         return true
     }
+
+    // Quitting andross shouldn't leave a booted emulator running as an
+    // orphan process — stop everything first, then let the app finish
+    // quitting. stopAll() shells out to adb, so it's kept off the main
+    // thread and the app waits for it via .terminateLater.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = EmulatorManager.shared.stopAll()
+            DispatchQueue.main.async {
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
+        }
+        return .terminateLater
+    }
 }
 
 @main
@@ -728,8 +742,6 @@ class ConfiguratorNSView: NSView {
     var targetWidth: CGFloat = 0
     var targetHeight: CGFloat = 0
     private var lastFrame: NSRect? = nil
-    private var isMaximizedMode = false
-    private var savedWindowFrame: NSRect? = nil
     private var isFirstResize = true
     private var isProgrammaticMove = false
     private var isPositioningScheduled = false
@@ -745,10 +757,6 @@ class ConfiguratorNSView: NSView {
         
         guard let window = self.window else {
             log("[WARN] updateWindowSize called but self.window is nil!")
-            return
-        }
-        
-        if isMaximizedMode {
             return
         }
         
@@ -847,15 +855,7 @@ class ConfiguratorNSView: NSView {
         
         // Ensure positioning and size are updated immediately when the window is available
         updateWindowSize(width: targetWidth, height: targetHeight)
-        
-        // Listen to custom maximize toggle notification
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleToggleMaximize),
-            name: NSNotification.Name("ToggleMaximize"),
-            object: nil
-        )
-        
+
         // 2. Intercept and wrap the window content view in our CustomGlassView
         guard let originalContentView = window.contentView,
               !(originalContentView is CustomGlassView) else {
@@ -951,81 +951,14 @@ class ConfiguratorNSView: NSView {
     }
     
     private func saveWindowPositionIfNeeded() {
-        guard let window = self.window, !isMaximizedMode, !isFirstResize, !isProgrammaticMove else { return }
+        guard let window = self.window, !isFirstResize, !isProgrammaticMove else { return }
         guard UserDefaults.standard.bool(forKey: "rememberWindowPosition") else { return }
         let frame = window.frame
         let topY = frame.origin.y + frame.size.height
         UserDefaults.standard.set(Double(frame.origin.x), forKey: "windowLastX")
         UserDefaults.standard.set(Double(topY), forKey: "windowLastTopY")
     }
-    
-    @objc private func handleToggleMaximize() {
-        self.toggleMaximize()
-    }
-    
-    
-    
-    private func toggleMaximize() {
-        guard let window = self.window,
-              let screen = window.screen ?? NSScreen.main else { return }
-        
-        isMaximizedMode.toggle()
-        
-        if isMaximizedMode {
-            // Save current frame
-            savedWindowFrame = window.frame
-            
-            let screenFrame = screen.visibleFrame
-            
-            // Disable rounding & borders
-            updateGlassViewStyle(isFullScreen: true)
-            
-            // Set frame to fill the screen
-            window.setFrame(screenFrame, display: true, animate: true)
-        } else {
-            // Restore windowed style
-            updateGlassViewStyle(isFullScreen: false)
-            
-            if let savedFrame = savedWindowFrame {
-                window.setFrame(savedFrame, display: true, animate: true)
-            } else {
-                let defaultFrame = NSRect(x: window.frame.origin.x, y: window.frame.origin.y, width: targetWidth, height: targetHeight)
-                window.setFrame(defaultFrame, display: true, animate: true)
-            }
-        }
-    }
-    
-    private func updateGlassViewStyle(isFullScreen: Bool) {
-        guard let window = self.window,
-              let glassView = window.contentView as? CustomGlassView else { return }
-        
-        if isFullScreen {
-            glassView.maskImage = nil
-            glassView.layer?.cornerRadius = 0
-            glassView.layer?.borderWidth = 0
-            glassView.blendingMode = .behindWindow
-            glassView.material = .hudWindow
-        } else {
-            let radius: CGFloat = 55
-            let maskSize = NSSize(width: radius * 2, height: radius * 2)
-            let maskImg = NSImage(size: maskSize, flipped: false) { rect in
-                NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
-                return true
-            }
-            maskImg.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
-            maskImg.resizingMode = .stretch
-            glassView.maskImage = maskImg
-            
-            glassView.layer?.cornerRadius = radius
-            glassView.layer?.cornerCurve = .continuous
-            glassView.layer?.masksToBounds = true
-            glassView.layer?.borderWidth = 1.5
-            glassView.layer?.borderColor = NSColor(white: 1.0, alpha: 0.12).cgColor
-            glassView.blendingMode = .behindWindow
-            glassView.material = .hudWindow
-        }
-    }
-    
+
     override func layout() {
         super.layout()
         configureWindow(initial: false)
@@ -1476,14 +1409,22 @@ struct ContentView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Minimize")
 
-            // Green: fullscreen toggle on click, preset sizes on hover
+            // Green: there's no meaningful "fullscreen" for a fixed-aspect
+            // phone/tablet frame (an earlier attempt to fill the screen never
+            // actually worked — SwiftUI's .windowResizability(.contentSize)
+            // snaps the window straight back to the content's fixed size).
+            // The one thing this button can usefully do is open the size
+            // picker, so click and hover both do that.
             Button {
-                NotificationCenter.default.post(name: NSNotification.Name("ToggleMaximize"), object: nil)
+                hoverTask?.cancel()
+                withAnimation(.easeOut(duration: 0.15)) {
+                    showSizesMenu = true
+                }
             } label: {
                 Circle().fill(Color.androidGreen).frame(width: 12, height: 12)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Zoom")
+            .accessibilityLabel("Window size")
             .onHover { hovering in
                 if hovering {
                     hoverTask?.cancel()
