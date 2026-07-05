@@ -53,14 +53,26 @@ public enum Shell {
         process.environment = childEnvironment()
 
         let outPipe = Pipe()
+        let errPipe = Pipe()
         process.standardOutput = outPipe
-        process.standardError = Pipe()
+        process.standardError = errPipe
 
-        var data = Data()
+        // group.wait() below establishes happens-before with these async
+        // writes, so the mutation is safe despite crossing an isolation
+        // boundary — nonisolated(unsafe) documents that instead of hiding it.
+        nonisolated(unsafe) var data = Data()
         let group = DispatchGroup()
         group.enter()
         DispatchQueue.global().async {
             data = outPipe.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
+        // Nobody reads stderr here, but the pipe still has to be drained —
+        // otherwise a chatty child blocks on write() once the kernel pipe
+        // buffer fills, hanging this call indefinitely.
+        group.enter()
+        DispatchQueue.global().async {
+            _ = errPipe.fileHandleForReading.readDataToEndOfFile()
             group.leave()
         }
 

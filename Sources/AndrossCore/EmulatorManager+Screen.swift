@@ -104,7 +104,11 @@ extension EmulatorManager {
 
             let outPipe = Pipe()
             process.standardOutput = outPipe
-            process.standardError = Pipe()
+            // This process runs for the whole streaming session (hours at
+            // ~60fps); nobody reads stderr, and a Pipe() nobody drains
+            // blocks the child dead once adb/screencap write enough to fill
+            // the kernel pipe buffer. Matches startAVD's convention.
+            process.standardError = FileHandle.nullDevice
 
             do {
                 try process.run()
