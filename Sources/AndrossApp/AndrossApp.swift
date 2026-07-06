@@ -160,7 +160,15 @@ final class AppModel: ObservableObject {
     }
     
     @Published var activeApp: ActiveApp? = nil
-    
+
+    /// iPhone Mirroring-style chrome: the top strip (traffic lights + window
+    /// controls) stays invisible until the pointer enters it.
+    @Published var chromeHovering = false
+    /// The size/rotation picker anchored to the green light. Lives on the
+    /// model because the green light (chip strip) and the menu (phone body)
+    /// render in different hosting views.
+    @Published var sizeMenuVisible = false
+
     // Default to Phone Portrait on launch
     @Published var isTablet = false
     @Published var isLandscape = false
@@ -746,6 +754,173 @@ private class CustomGlassView: NSVisualEffectView {
     // Marker class to prevent multiple wrapping
 }
 
+/// Window content container that owns the iPhone Mirroring-style top strip:
+/// a transparent band above the glass phone where the traffic lights and the
+/// chip bar live, fading in only while the pointer is over it.
+final class ChipHoverContainerView: NSView {
+    static let stripHeight: CGFloat = 32
+    /// Extend the hover zone a little below the strip so the chrome doesn't
+    /// flicker off the instant the pointer dips toward the buttons.
+    private static let hoverSlop: CGFloat = 8
+    private var hideWorkItem: DispatchWorkItem?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        let strip = NSRect(x: 0,
+                           y: bounds.height - Self.stripHeight - Self.hoverSlop,
+                           width: bounds.width,
+                           height: Self.stripHeight + Self.hoverSlop)
+        addTrackingArea(NSTrackingArea(rect: strip,
+                                       options: [.mouseEnteredAndExited, .activeAlways],
+                                       owner: self, userInfo: nil))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hideWorkItem?.cancel()
+        hideWorkItem = nil
+        setChrome(visible: true, animated: true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        // Small grace period, matching the size menu's own hide delay, so a
+        // pointer briefly leaving the strip doesn't yank the chrome away.
+        let work = DispatchWorkItem { [weak self] in
+            self?.setChrome(visible: false, animated: true)
+        }
+        hideWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+    }
+
+    func setChrome(visible: Bool, animated: Bool) {
+        if let window {
+            let buttons = [window.standardWindowButton(.closeButton),
+                           window.standardWindowButton(.miniaturizeButton)]
+            if animated {
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.15
+                    buttons.forEach { $0?.animator().alphaValue = visible ? 1 : 0 }
+                }
+            } else {
+                buttons.forEach { $0?.alphaValue = visible ? 1 : 0 }
+            }
+        }
+        Task { @MainActor in
+            withAnimation(.easeOut(duration: 0.15)) {
+                AppModel.shared.chromeHovering = visible
+            }
+        }
+    }
+}
+
+/// The hover chip: green light (size/rotation picker) in the third traffic
+/// light slot, plus the window controls on the right — rendered in the top
+/// strip, visible only while `chromeHovering`.
+private struct ChipBarView: View {
+    @ObservedObject var model = AppModel.shared
+    @State private var hoverTask: Task<Void, Never>? = nil
+
+    var body: some View {
+        ZStack {
+            // Chip backdrop, spanning the strip like iPhone Mirroring's pill.
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.black.opacity(0.35))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                )
+                .padding(2)
+
+            HStack(spacing: 8) {
+                // Green light in the native zoom slot (x=55, 14pt, matching
+                // the real close/minimize widgets beside it). Click or hover
+                // opens the size/rotation picker — the reason this app keeps
+                // its green light at all.
+                Button {
+                    hoverTask?.cancel()
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        model.sizeMenuVisible = true
+                    }
+                } label: {
+                    Circle().fill(Color.androidGreen).frame(width: 14, height: 14)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Window size")
+                .help("Window size & rotation")
+                .onHover { hovering in
+                    if hovering {
+                        hoverTask?.cancel()
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            model.sizeMenuVisible = true
+                        }
+                    } else {
+                        hoverTask = Task {
+                            try? await Task.sleep(nanoseconds: 300_000_000)
+                            if !Task.isCancelled {
+                                withAnimation(.easeIn(duration: 0.15)) {
+                                    model.sizeMenuVisible = false
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(.leading, 55)
+
+                Spacer()
+
+                if model.activeSerial != nil {
+                    // Screen View toggle — the "multitask" position.
+                    Button {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            if model.activeApp == .screen {
+                                model.activeApp = nil
+                            } else {
+                                model.openScreen()
+                            }
+                        }
+                    } label: {
+                        Image(systemName: model.activeApp == .screen ? "iphone.slash" : "play.display")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(model.activeApp == .screen ? Color.androidGreen : Color.white.opacity(0.85))
+                            .frame(width: 22, height: 22)
+                            .background(Color.white.opacity(0.08))
+                            .clipShape(Circle())
+                            .overlay(Circle().stroke(Color.white.opacity(0.12), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .help(model.activeApp == .screen ? "Close Screen View" : "Open Screen View")
+
+                    // Detach/Eject — the "home" position.
+                    Button {
+                        model.toggleHeadedHeadless()
+                    } label: {
+                        Image(systemName: model.headlessBoot ? "arrow.up.right.square" : "arrow.down.left.square")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(Color.white.opacity(0.85))
+                            .frame(width: 22, height: 22)
+                            .background(Color.white.opacity(0.08))
+                            .clipShape(Circle())
+                            .overlay(Circle().stroke(Color.white.opacity(0.12), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .help(model.headlessBoot ? "Pop Out Phone Window" : "Embed Phone Window")
+                }
+            }
+            .padding(.trailing, 10)
+        }
+        .opacity(model.chromeHovering ? 1 : 0)
+        .allowsHitTesting(model.chromeHovering)
+        // The hosting view sits inside the titlebar region, so SwiftUI
+        // inherits a 32pt top safe-area inset that would otherwise push
+        // this 32pt-tall bar completely out of its own bounds.
+        .ignoresSafeArea()
+    }
+}
+
 class ConfiguratorNSView: NSView {
     var targetWidth: CGFloat = 0
     var targetHeight: CGFloat = 0
@@ -864,18 +1039,26 @@ class ConfiguratorNSView: NSView {
         // Ensure positioning and size are updated immediately when the window is available
         updateWindowSize(width: targetWidth, height: targetHeight)
 
-        // 2. Intercept and wrap the window content view in our CustomGlassView
+        // 2. Rebuild the window's content into iPhone Mirroring's shape:
+        //    a clear container whose top strip (titlebar height) is empty
+        //    except on hover, with the glass "phone" occupying everything
+        //    below it. The system traffic lights already live in the strip;
+        //    ChipHoverContainerView fades them (plus the SwiftUI chip bar)
+        //    in and out.
         guard let originalContentView = window.contentView,
-              !(originalContentView is CustomGlassView) else {
+              !(originalContentView is ChipHoverContainerView) else {
             return
         }
-        
+
+        let container = ChipHoverContainerView()
+        container.wantsLayer = true
+
         let glassView = CustomGlassView()
         glassView.material = .hudWindow // Dark elegant frosted glass blur
         glassView.blendingMode = .behindWindow
         glassView.state = .active
         glassView.wantsLayer = true
-        
+
         // Apply maskImage for perfect rounding of the visual effect material
         let radius: CGFloat = 55
         let maskSize = NSSize(width: radius * 2, height: radius * 2)
@@ -886,30 +1069,55 @@ class ConfiguratorNSView: NSView {
         maskImg.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
         maskImg.resizingMode = .stretch
         glassView.maskImage = maskImg
-        
+
         glassView.layer?.cornerRadius = radius
         glassView.layer?.cornerCurve = .continuous
         glassView.layer?.masksToBounds = true
         glassView.layer?.borderWidth = 1.5
         glassView.layer?.borderColor = NSColor(white: 1.0, alpha: 0.12).cgColor
-        
+
         // Swap content view
-        window.contentView = glassView
-        
-        // Add original content view as subview of glass view
-        glassView.addSubview(originalContentView)
+        window.contentView = container
+
+        // Glass phone body: everything below the chrome strip.
+        container.addSubview(glassView)
+        glassView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            glassView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            glassView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            glassView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            glassView.topAnchor.constraint(equalTo: container.topAnchor,
+                                           constant: ChipHoverContainerView.stripHeight)
+        ])
+
+        // SwiftUI content spans the full window (it lays itself out below
+        // the titlebar safe area, i.e. inside the glass).
+        container.addSubview(originalContentView)
         originalContentView.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            originalContentView.leadingAnchor.constraint(equalTo: glassView.leadingAnchor),
-            originalContentView.trailingAnchor.constraint(equalTo: glassView.trailingAnchor),
-            originalContentView.topAnchor.constraint(equalTo: glassView.topAnchor),
-            originalContentView.bottomAnchor.constraint(equalTo: glassView.bottomAnchor)
+            originalContentView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            originalContentView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            originalContentView.topAnchor.constraint(equalTo: container.topAnchor),
+            originalContentView.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         ])
-        
+
+        // Chip bar (green light + window controls) rendered by SwiftUI in
+        // the strip, above everything else.
+        let chipHost = NSHostingView(rootView: ChipBarView())
+        chipHost.sizingOptions = []
+        container.addSubview(chipHost)
+        chipHost.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            chipHost.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            chipHost.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            chipHost.topAnchor.constraint(equalTo: container.topAnchor),
+            chipHost.heightAnchor.constraint(equalToConstant: ChipHoverContainerView.stripHeight)
+        ])
+
         // Hide standard window background visual effect views (siblings of content view under NSThemeFrame)
-        if let rootView = glassView.superview {
+        if let rootView = container.superview {
             for subview in rootView.subviews {
-                if subview !== glassView {
+                if subview !== container {
                     let className = String(describing: type(of: subview))
                     if subview is NSVisualEffectView || className.contains("VisualEffectView") {
                         subview.isHidden = true
@@ -918,6 +1126,9 @@ class ConfiguratorNSView: NSView {
                 }
             }
         }
+
+        // Start with the chrome invisible — traffic lights fade in on hover.
+        container.setChrome(visible: false, animated: false)
     }
     
     deinit {
@@ -1033,6 +1244,17 @@ class ConfiguratorNSView: NSView {
             // visual style. Content still spans the full window; the
             // system draws the buttons on top of it in their usual corner.
             window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+            // The app is hard dark-themed (preferredColorScheme(.dark)); pin
+            // the window appearance so AppKit-side chrome — the glass
+            // material, titlebar strip, traffic-light backplates — renders
+            // dark too. Without this the glass (now a subview rather than
+            // the content view) picks up the system appearance and .hudWindow
+            // turns light gray.
+            window.appearance = NSAppearance(named: .darkAqua)
+            // The native zoom widget's behavior (tiling/fullscreen) makes no
+            // sense for a fixed-aspect phone frame; its slot is taken by the
+            // custom green light in ChipBarView (size/rotation picker).
+            window.standardWindowButton(.zoomButton)?.isHidden = true
             window.collectionBehavior = [.managed]
             window.isMovableByWindowBackground = true
             window.hasShadow = true
@@ -1055,7 +1277,6 @@ struct ContentView: View {
     // The shared instance — the app delegate routes Finder-opened APKs here.
     @StateObject private var model = AppModel.shared
     @State private var showCreateSheet = false
-    @State private var showSizesMenu = false
     @State private var hoverTask: Task<Void, Never>? = nil
     @State private var dockHovering = false
     var body: some View {
@@ -1238,16 +1459,17 @@ struct ContentView: View {
             .background(Color.slateDeep.opacity(0.2))
             .background(WindowConfigurator(width: model.currentWidth, height: model.currentHeight)) // Apply NSWindow configurations
             
-            // Custom hover menu overlay (lightweight, zero event blocking)
-            if showSizesMenu {
+            // Size/rotation menu, dropping down from the green light in the
+            // chip strip above (lightweight, zero event blocking).
+            if model.sizeMenuVisible {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Preset Sizes")
                         .font(.system(size: 9)).bold()
                         .foregroundStyle(Color.slateTextDim)
                         .padding(.horizontal, 4)
-                    
+
                     Divider().background(Color.white.opacity(0.1))
-                    
+
                     Group {
                         sizeMenuButton(title: "Phone (Portrait)", isTablet: false, isLandscape: false)
                         sizeMenuButton(title: "Phone (Landscape)", isTablet: false, isLandscape: true)
@@ -1258,10 +1480,8 @@ struct ContentView: View {
                 .padding(6)
                 .frame(width: 140)
                 .liquidGlassBackground(cornerRadius: 12)
-                // Mirrors the old top-left placement, now anchored under the
-                // trailing controls instead — stays under the trigger button
-                // regardless of the window's current width (phone/tablet).
-                .position(x: model.currentWidth - 106, y: 110)
+                // Under the green light (third traffic-light slot, x≈62).
+                .position(x: 106, y: 90)
                 .onHover { hovering in
                     if hovering {
                         hoverTask?.cancel()
@@ -1270,7 +1490,7 @@ struct ContentView: View {
                             try? await Task.sleep(nanoseconds: 300_000_000)
                             if !Task.isCancelled {
                                 withAnimation(.easeIn(duration: 0.15)) {
-                                    showSizesMenu = false
+                                    model.sizeMenuVisible = false
                                 }
                             }
                         }
@@ -1343,13 +1563,6 @@ struct ContentView: View {
                 .allowsHitTesting(false)
             }
         }
-        // Trailing controls (Screen Toggle, Detach/Eject, window size) opposite the native traffic lights
-        .overlay(alignment: .topTrailing) {
-            trailingControls
-                .padding(.trailing, 36)
-                .padding(.top, 29)
-                .transaction { $0.animation = nil }
-        }
         // Create Device Sheet
         .sheet(isPresented: $showCreateSheet) {
             VStack(spacing: 16) {
@@ -1403,87 +1616,6 @@ struct ContentView: View {
         .background(Color.clear)
     }
     
-    // Trailing controls: Screen View toggle, Window Detach/Eject, and the
-    // window-size picker. Close/minimize/zoom are now the real system
-    // traffic lights (see configureWindow) — nothing to draw for those here.
-    private var trailingControls: some View {
-        HStack(spacing: 8) {
-            if model.activeSerial != nil {
-                // 1. Toggle Screen View button
-                Button {
-                    withAnimation(.easeOut(duration: 0.15)) {
-                        if model.activeApp == .screen {
-                            model.activeApp = nil
-                        } else {
-                            model.openScreen()
-                        }
-                    }
-                } label: {
-                    Image(systemName: model.activeApp == .screen ? "iphone.slash" : "play.display")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(model.activeApp == .screen ? Color.androidGreen : Color.white.opacity(0.85))
-                        .frame(width: 22, height: 22)
-                        .background(Color.white.opacity(0.08))
-                        .clipShape(Circle())
-                        .overlay(Circle().stroke(Color.white.opacity(0.12), lineWidth: 1))
-                }
-                .buttonStyle(.plain)
-                .help(model.activeApp == .screen ? "Close Screen View" : "Open Screen View")
-
-                // 2. Detach/Eject button
-                Button {
-                    model.toggleHeadedHeadless()
-                } label: {
-                    Image(systemName: model.headlessBoot ? "arrow.up.right.square" : "arrow.down.left.square")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(Color.white.opacity(0.85))
-                        .frame(width: 22, height: 22)
-                        .background(Color.white.opacity(0.08))
-                        .clipShape(Circle())
-                        .overlay(Circle().stroke(Color.white.opacity(0.12), lineWidth: 1))
-                }
-                .buttonStyle(.plain)
-                .help(model.headlessBoot ? "Pop Out Phone Window" : "Embed Phone Window")
-            }
-
-            // 3. Window size picker (click or hover)
-            Button {
-                hoverTask?.cancel()
-                withAnimation(.easeOut(duration: 0.15)) {
-                    showSizesMenu = true
-                }
-            } label: {
-                Image(systemName: "aspectratio")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(Color.white.opacity(0.85))
-                    .frame(width: 22, height: 22)
-                    .background(Color.white.opacity(0.08))
-                    .clipShape(Circle())
-                    .overlay(Circle().stroke(Color.white.opacity(0.12), lineWidth: 1))
-            }
-            .buttonStyle(.plain)
-            .help("Window size")
-            .accessibilityLabel("Window size")
-            .onHover { hovering in
-                if hovering {
-                    hoverTask?.cancel()
-                    withAnimation(.easeOut(duration: 0.15)) {
-                        showSizesMenu = true
-                    }
-                } else {
-                    hoverTask = Task {
-                        try? await Task.sleep(nanoseconds: 300_000_000) // 300ms delay
-                        if !Task.isCancelled {
-                            withAnimation(.easeIn(duration: 0.15)) {
-                                showSizesMenu = false
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     private func activeAppTitle(_ app: AppModel.ActiveApp) -> String {
         switch app {
         case .devices: return "Devices"
@@ -1585,7 +1717,7 @@ struct ContentView: View {
                 model.isLandscape = isLandscape
                 model.refreshStorageStats()
             }
-            showSizesMenu = false
+            model.sizeMenuVisible = false
         } label: {
             HStack {
                 Text(title)
