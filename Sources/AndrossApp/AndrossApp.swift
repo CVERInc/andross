@@ -750,14 +750,14 @@ struct WindowConfigurator: NSViewRepresentable {
     }
 }
 
+/// The window's entire visible surface (borderless: this view fills the
+/// whole window, edge to edge — there is no separate system-drawn chrome to
+/// leak from behind it). Owns the top-strip hover zone: moving the pointer
+/// into the top 32pt (+8pt slop) fades in the hand-drawn traffic lights and
+/// window controls, rendered by ChipBarView as an overlay on top of the
+/// regular SwiftUI content — matching the old borderless app's behavior,
+/// just with a hover gate instead of always-on dots.
 private class CustomGlassView: NSVisualEffectView {
-    // Marker class to prevent multiple wrapping
-}
-
-/// Window content container that owns the iPhone Mirroring-style top strip:
-/// a transparent band above the glass phone where the traffic lights and the
-/// chip bar live, fading in only while the pointer is over it.
-final class ChipHoverContainerView: NSView {
     static let stripHeight: CGFloat = 32
     /// Extend the hover zone a little below the strip so the chrome doesn't
     /// flicker off the instant the pointer dips toward the buttons.
@@ -779,32 +779,22 @@ final class ChipHoverContainerView: NSView {
     override func mouseEntered(with event: NSEvent) {
         hideWorkItem?.cancel()
         hideWorkItem = nil
-        setChrome(visible: true, animated: true)
+        setChrome(visible: true)
     }
 
     override func mouseExited(with event: NSEvent) {
         // Small grace period, matching the size menu's own hide delay, so a
         // pointer briefly leaving the strip doesn't yank the chrome away.
         let work = DispatchWorkItem { [weak self] in
-            self?.setChrome(visible: false, animated: true)
+            self?.setChrome(visible: false)
         }
         hideWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
-    func setChrome(visible: Bool, animated: Bool) {
-        if let window {
-            let buttons = [window.standardWindowButton(.closeButton),
-                           window.standardWindowButton(.miniaturizeButton)]
-            if animated {
-                NSAnimationContext.runAnimationGroup { context in
-                    context.duration = 0.15
-                    buttons.forEach { $0?.animator().alphaValue = visible ? 1 : 0 }
-                }
-            } else {
-                buttons.forEach { $0?.alphaValue = visible ? 1 : 0 }
-            }
-        }
+    /// Chrome here is entirely SwiftUI (ChipBarView) — there are no AppKit
+    /// buttons to animate separately, unlike the earlier .titled attempt.
+    func setChrome(visible: Bool) {
         Task { @MainActor in
             withAnimation(.easeOut(duration: 0.15)) {
                 AppModel.shared.chromeHovering = visible
@@ -813,33 +803,45 @@ final class ChipHoverContainerView: NSView {
     }
 }
 
-/// The hover chip: green light (size/rotation picker) in the third traffic
-/// light slot, plus the window controls on the right — rendered in the top
-/// strip, visible only while `chromeHovering`.
+/// The hover chip: hand-drawn traffic lights (borderless windows have no
+/// real ones — see the Probe 2 note on configureWindow) plus the window
+/// controls on the right, rendered directly on the glass, visible only
+/// while `chromeHovering`. No pill backdrop: the dots sit straight on the
+/// glass, matching the old always-on borderless look, just hover-gated.
 private struct ChipBarView: View {
     @ObservedObject var model = AppModel.shared
+    let window: NSWindow?
     @State private var hoverTask: Task<Void, Never>? = nil
 
     var body: some View {
         ZStack {
-            // Chip backdrop, spanning the strip like iPhone Mirroring's pill.
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.black.opacity(0.35))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                )
-                .padding(2)
+            HStack(spacing: 9) {
+                // Red/yellow are hand-drawn with explicit actions — real
+                // standardWindowButton(_:for:) widgets were tried and
+                // rejected (see configureWindow): outside their titlebar
+                // slot they render as plain black dots and don't respond
+                // to clicks. Action reaches this exact window directly
+                // (captured at chip-host construction), never
+                // NSApp.keyWindow — that ambiguity is what broke the old
+                // yellow light.
+                Button { NSApp.terminate(nil) } label: {
+                    Circle().fill(Color.slateRed).frame(width: 14, height: 14)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Close")
+                .help("Close (quits andross)")
 
-            HStack(spacing: 8) {
-                // Green light in the native zoom slot (x=55, 14pt, matching
-                // the real close/minimize widgets beside it). Click or hover
-                // opens the size/rotation picker — the reason this app keeps
-                // its green light at all.
+                Button { window?.miniaturize(nil) } label: {
+                    Circle().fill(Color(hex: 0xFFBD2E)).frame(width: 14, height: 14)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Minimize")
+                .help("Minimize")
+
+                // Green: click or hover opens the size/rotation picker —
+                // the reason this app keeps a green light at all (see
+                // hub discussion: iPhone Mirroring drops it, andross needs
+                // it for phone/tablet + portrait/landscape switching).
                 Button {
                     hoverTask?.cancel()
                     withAnimation(.easeOut(duration: 0.15)) {
@@ -868,7 +870,6 @@ private struct ChipBarView: View {
                         }
                     }
                 }
-                .padding(.leading, 55)
 
                 Spacer()
 
@@ -910,13 +911,11 @@ private struct ChipBarView: View {
                     .help(model.headlessBoot ? "Pop Out Phone Window" : "Embed Phone Window")
                 }
             }
+            .padding(.leading, 9)
             .padding(.trailing, 10)
         }
         .opacity(model.chromeHovering ? 1 : 0)
         .allowsHitTesting(model.chromeHovering)
-        // The hosting view sits inside the titlebar region, so SwiftUI
-        // inherits a 32pt top safe-area inset that would otherwise push
-        // this 32pt-tall bar completely out of its own bounds.
         .ignoresSafeArea()
     }
 }
@@ -1039,19 +1038,15 @@ class ConfiguratorNSView: NSView {
         // Ensure positioning and size are updated immediately when the window is available
         updateWindowSize(width: targetWidth, height: targetHeight)
 
-        // 2. Rebuild the window's content into iPhone Mirroring's shape:
-        //    a clear container whose top strip (titlebar height) is empty
-        //    except on hover, with the glass "phone" occupying everything
-        //    below it. The system traffic lights already live in the strip;
-        //    ChipHoverContainerView fades them (plus the SwiftUI chip bar)
-        //    in and out.
+        // 2. Intercept and wrap the window content view in our CustomGlassView.
+        //    Borderless: the glass IS the content view (no separate strip
+        //    container needed — there's no system title bar height to
+        //    reserve space for). Every visible pixel in the window is this
+        //    view or something drawn inside it.
         guard let originalContentView = window.contentView,
-              !(originalContentView is ChipHoverContainerView) else {
+              !(originalContentView is CustomGlassView) else {
             return
         }
-
-        let container = ChipHoverContainerView()
-        container.wantsLayer = true
 
         let glassView = CustomGlassView()
         glassView.material = .hudWindow // Dark elegant frosted glass blur
@@ -1077,47 +1072,36 @@ class ConfiguratorNSView: NSView {
         glassView.layer?.borderColor = NSColor(white: 1.0, alpha: 0.12).cgColor
 
         // Swap content view
-        window.contentView = container
+        window.contentView = glassView
 
-        // Glass phone body: everything below the chrome strip.
-        container.addSubview(glassView)
-        glassView.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            glassView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            glassView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            glassView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            glassView.topAnchor.constraint(equalTo: container.topAnchor,
-                                           constant: ChipHoverContainerView.stripHeight)
-        ])
-
-        // SwiftUI content spans the full window (it lays itself out below
-        // the titlebar safe area, i.e. inside the glass).
-        container.addSubview(originalContentView)
+        // Add original content view as subview of glass view
+        glassView.addSubview(originalContentView)
         originalContentView.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            originalContentView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            originalContentView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            originalContentView.topAnchor.constraint(equalTo: container.topAnchor),
-            originalContentView.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+            originalContentView.leadingAnchor.constraint(equalTo: glassView.leadingAnchor),
+            originalContentView.trailingAnchor.constraint(equalTo: glassView.trailingAnchor),
+            originalContentView.topAnchor.constraint(equalTo: glassView.topAnchor),
+            originalContentView.bottomAnchor.constraint(equalTo: glassView.bottomAnchor)
         ])
 
-        // Chip bar (green light + window controls) rendered by SwiftUI in
-        // the strip, above everything else.
-        let chipHost = NSHostingView(rootView: ChipBarView())
+        // Chip bar (traffic lights + window controls), overlaid on the top
+        // strip of the glass — on top of the regular SwiftUI content,
+        // exactly where the old hand-drawn dots used to sit.
+        let chipHost = NSHostingView(rootView: ChipBarView(window: window))
         chipHost.sizingOptions = []
-        container.addSubview(chipHost)
+        glassView.addSubview(chipHost)
         chipHost.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            chipHost.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            chipHost.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            chipHost.topAnchor.constraint(equalTo: container.topAnchor),
-            chipHost.heightAnchor.constraint(equalToConstant: ChipHoverContainerView.stripHeight)
+            chipHost.leadingAnchor.constraint(equalTo: glassView.leadingAnchor),
+            chipHost.trailingAnchor.constraint(equalTo: glassView.trailingAnchor),
+            chipHost.topAnchor.constraint(equalTo: glassView.topAnchor),
+            chipHost.heightAnchor.constraint(equalToConstant: CustomGlassView.stripHeight)
         ])
 
         // Hide standard window background visual effect views (siblings of content view under NSThemeFrame)
-        if let rootView = container.superview {
+        if let rootView = glassView.superview {
             for subview in rootView.subviews {
-                if subview !== container {
+                if subview !== glassView {
                     let className = String(describing: type(of: subview))
                     if subview is NSVisualEffectView || className.contains("VisualEffectView") {
                         subview.isHidden = true
@@ -1128,9 +1112,9 @@ class ConfiguratorNSView: NSView {
         }
 
         // Start with the chrome invisible — traffic lights fade in on hover.
-        container.setChrome(visible: false, animated: false)
+        glassView.setChrome(visible: false)
     }
-    
+
     deinit {
         NotificationCenter.default.removeObserver(self)
     }
@@ -1236,25 +1220,22 @@ class ConfiguratorNSView: NSView {
     private func configureWindow(initial: Bool) {
         guard let window = self.window else { return }
         if initial {
-            // Real traffic lights, not hand-drawn circles: .titled +
-            // .fullSizeContentView gives the standard close/minimize/zoom
-            // buttons their normal AppKit-driven behavior (a borderless
-            // window has none of that, however convincing the fake dots
-            // look), while transparent+hidden title keeps the borderless
-            // visual style. Content still spans the full window; the
-            // system draws the buttons on top of it in their usual corner.
-            window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+            // Borderless: the window contributes zero system-drawn pixels
+            // (no NSThemeFrame chrome, no macOS 26 glass backplate), so
+            // there's nothing for our own rounded glass content to leak
+            // out from underneath. .miniaturizable/.closable still let
+            // window.miniaturize(_:)/performClose(_:) work correctly even
+            // without .titled — verified directly (AXMinimized flips true).
+            // Real standardWindowButton(_:for:) factory widgets were tried
+            // first and rejected: outside their real titlebar slot they
+            // render as plain black dots and don't respond to clicks (even
+            // AX-driven presses) — dead weight pretending to be chrome.
+            // Hand-drawn dots + explicit actions are what actually work.
+            window.styleMask = [.borderless, .resizable, .miniaturizable, .closable]
             // The app is hard dark-themed (preferredColorScheme(.dark)); pin
             // the window appearance so AppKit-side chrome — the glass
-            // material, titlebar strip, traffic-light backplates — renders
-            // dark too. Without this the glass (now a subview rather than
-            // the content view) picks up the system appearance and .hudWindow
-            // turns light gray.
+            // material — renders dark too.
             window.appearance = NSAppearance(named: .darkAqua)
-            // The native zoom widget's behavior (tiling/fullscreen) makes no
-            // sense for a fixed-aspect phone frame; its slot is taken by the
-            // custom green light in ChipBarView (size/rotation picker).
-            window.standardWindowButton(.zoomButton)?.isHidden = true
             window.collectionBehavior = [.managed]
             window.isMovableByWindowBackground = true
             window.hasShadow = true
