@@ -57,6 +57,14 @@ final class AndrossAppDelegate: NSObject, NSApplicationDelegate {
         }
         return .terminateLater
     }
+
+    // The native red traffic light just closes the window (AppKit's default
+    // performClose: behavior) — it does not quit the app on its own. This is
+    // a single-window utility, so closing the only window should still quit
+    // (and therefore still run applicationShouldTerminate above).
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        true
+    }
 }
 
 @main
@@ -1017,7 +1025,14 @@ class ConfiguratorNSView: NSView {
     private func configureWindow(initial: Bool) {
         guard let window = self.window else { return }
         if initial {
-            window.styleMask = [.borderless, .resizable]
+            // Real traffic lights, not hand-drawn circles: .titled +
+            // .fullSizeContentView gives the standard close/minimize/zoom
+            // buttons their normal AppKit-driven behavior (a borderless
+            // window has none of that, however convincing the fake dots
+            // look), while transparent+hidden title keeps the borderless
+            // visual style. Content still spans the full window; the
+            // system draws the buttons on top of it in their usual corner.
+            window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
             window.collectionBehavior = [.managed]
             window.isMovableByWindowBackground = true
             window.hasShadow = true
@@ -1243,7 +1258,10 @@ struct ContentView: View {
                 .padding(6)
                 .frame(width: 140)
                 .liquidGlassBackground(cornerRadius: 12)
-                .position(x: 106, y: 110)
+                // Mirrors the old top-left placement, now anchored under the
+                // trailing controls instead — stays under the trigger button
+                // regardless of the window's current width (phone/tablet).
+                .position(x: model.currentWidth - 106, y: 110)
                 .onHover { hovering in
                     if hovering {
                         hoverTask?.cancel()
@@ -1325,15 +1343,7 @@ struct ContentView: View {
                 .allowsHitTesting(false)
             }
         }
-        // Traffic lights pinned to the window's top-left corner, outside the
-        // animating layout (they used to drift during size-change springs).
-        .overlay(alignment: .topLeading) {
-            trafficLights
-                .padding(.leading, 36)
-                .padding(.top, 34)
-                .transaction { $0.animation = nil }
-        }
-        // Trailing controls (Screen Toggle and Detach/Eject) opposite the traffic lights
+        // Trailing controls (Screen Toggle, Detach/Eject, window size) opposite the native traffic lights
         .overlay(alignment: .topTrailing) {
             trailingControls
                 .padding(.trailing, 36)
@@ -1393,59 +1403,9 @@ struct ContentView: View {
         .background(Color.clear)
     }
     
-    // Custom traffic lights: real Buttons (not tap gestures) so they always
-    // win hit-testing against window-background dragging.
-    private var trafficLights: some View {
-        HStack(spacing: 8) {
-            Button { NSApp.terminate(nil) } label: {
-                Circle().fill(Color.slateRed).frame(width: 12, height: 12)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Close")
-
-            Button { NSApp.keyWindow?.miniaturize(nil) } label: {
-                Circle().fill(Color(hex: 0xFFBD2E)).frame(width: 12, height: 12)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Minimize")
-
-            // Green: there's no meaningful "fullscreen" for a fixed-aspect
-            // phone/tablet frame (an earlier attempt to fill the screen never
-            // actually worked — SwiftUI's .windowResizability(.contentSize)
-            // snaps the window straight back to the content's fixed size).
-            // The one thing this button can usefully do is open the size
-            // picker, so click and hover both do that.
-            Button {
-                hoverTask?.cancel()
-                withAnimation(.easeOut(duration: 0.15)) {
-                    showSizesMenu = true
-                }
-            } label: {
-                Circle().fill(Color.androidGreen).frame(width: 12, height: 12)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Window size")
-            .onHover { hovering in
-                if hovering {
-                    hoverTask?.cancel()
-                    withAnimation(.easeOut(duration: 0.15)) {
-                        showSizesMenu = true
-                    }
-                } else {
-                    hoverTask = Task {
-                        try? await Task.sleep(nanoseconds: 300_000_000) // 300ms delay
-                        if !Task.isCancelled {
-                            withAnimation(.easeIn(duration: 0.15)) {
-                                showSizesMenu = false
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Trailing controls: Screen View toggle & Window Detach/Eject button
+    // Trailing controls: Screen View toggle, Window Detach/Eject, and the
+    // window-size picker. Close/minimize/zoom are now the real system
+    // traffic lights (see configureWindow) — nothing to draw for those here.
     private var trailingControls: some View {
         HStack(spacing: 8) {
             if model.activeSerial != nil {
@@ -1484,6 +1444,42 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .help(model.headlessBoot ? "Pop Out Phone Window" : "Embed Phone Window")
+            }
+
+            // 3. Window size picker (click or hover)
+            Button {
+                hoverTask?.cancel()
+                withAnimation(.easeOut(duration: 0.15)) {
+                    showSizesMenu = true
+                }
+            } label: {
+                Image(systemName: "aspectratio")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Color.white.opacity(0.85))
+                    .frame(width: 22, height: 22)
+                    .background(Color.white.opacity(0.08))
+                    .clipShape(Circle())
+                    .overlay(Circle().stroke(Color.white.opacity(0.12), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .help("Window size")
+            .accessibilityLabel("Window size")
+            .onHover { hovering in
+                if hovering {
+                    hoverTask?.cancel()
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        showSizesMenu = true
+                    }
+                } else {
+                    hoverTask = Task {
+                        try? await Task.sleep(nanoseconds: 300_000_000) // 300ms delay
+                        if !Task.isCancelled {
+                            withAnimation(.easeIn(duration: 0.15)) {
+                                showSizesMenu = false
+                            }
+                        }
+                    }
+                }
             }
         }
     }
