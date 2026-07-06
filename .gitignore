@@ -2,3 +2,6 @@
 .DS_Store
 *.log
 .swiftpm/
+
+# Local session plan docs — do not publish
+PLAN-*.md
