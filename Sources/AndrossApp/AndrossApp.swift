@@ -753,12 +753,17 @@ struct WindowConfigurator: NSViewRepresentable {
 /// The window's entire visible surface (borderless: this view fills the
 /// whole window, edge to edge — there is no separate system-drawn chrome to
 /// leak from behind it). Owns the top-strip hover zone: moving the pointer
-/// into the top 32pt (+8pt slop) fades in the hand-drawn traffic lights and
-/// window controls, rendered by ChipBarView as an overlay on top of the
-/// regular SwiftUI content — matching the old borderless app's behavior,
-/// just with a hover gate instead of always-on dots.
+/// into the header row (+8pt slop below it) fades in the hand-drawn
+/// traffic lights and window controls, rendered by ChipBarView as an
+/// overlay on top of the regular SwiftUI content — matching the old
+/// borderless app's behavior, just with a hover gate instead of always-on
+/// dots.
 private class CustomGlassView: NSVisualEffectView {
-    static let stripHeight: CGFloat = 32
+    /// Matches ContentView's own header row exactly (top:32 + ~20pt title
+    /// text + bottom:12, ending right at the divider) so the chip bar's
+    /// hover zone — and the dots inside it — line up with the title
+    /// instead of floating in their own disconnected band above it.
+    static let stripHeight: CGFloat = 64
     /// Extend the hover zone a little below the strip so the chrome doesn't
     /// flicker off the instant the pointer dips toward the buttons.
     private static let hoverSlop: CGFloat = 8
@@ -904,7 +909,14 @@ private struct ChipBarView: View {
             // real breathing room instead of hugging the corner.
             .padding(.leading, 20)
             .padding(.trailing, 10)
+            // Same top offset as ContentView's header title (.padding(.top,
+            // 32) there too) — the dots were floating in their own band,
+            // vertically disconnected from "andross" below them. Matching
+            // the offset puts both on the same visual row, the way a real
+            // titlebar keeps lights and title on one baseline.
+            .padding(.top, 32)
         }
+        .frame(maxHeight: .infinity, alignment: .top)
         .opacity(model.chromeHovering ? 1 : 0)
         .allowsHitTesting(model.chromeHovering)
         .ignoresSafeArea()
