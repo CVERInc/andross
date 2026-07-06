@@ -811,7 +811,6 @@ private class CustomGlassView: NSVisualEffectView {
 private struct ChipBarView: View {
     @ObservedObject var model = AppModel.shared
     let window: NSWindow?
-    @State private var hoverTask: Task<Void, Never>? = nil
 
     var body: some View {
         ZStack {
@@ -838,37 +837,25 @@ private struct ChipBarView: View {
                 .accessibilityLabel("Minimize")
                 .help("Minimize")
 
-                // Green: click or hover opens the size/rotation picker —
-                // the reason this app keeps a green light at all (see
-                // hub discussion: iPhone Mirroring drops it, andross needs
-                // it for phone/tablet + portrait/landscape switching).
+                // Green: click toggles the size/rotation picker — the
+                // reason this app keeps a green light at all (see hub
+                // discussion: iPhone Mirroring drops it, andross needs it
+                // for phone/tablet + portrait/landscape switching). Click,
+                // not hover: a 14pt target is too small to reliably land on
+                // mid-fade-in, and cubeconjure's LangPicker already proved
+                // the fix — a plain button toggling a real .popover, not a
+                // hover-driven reveal (SwiftUI's Menu has the same tiny-
+                // hit-area problem the button there was written to avoid).
                 Button {
-                    hoverTask?.cancel()
-                    withAnimation(.easeOut(duration: 0.15)) {
-                        model.sizeMenuVisible = true
-                    }
+                    model.sizeMenuVisible.toggle()
                 } label: {
                     Circle().fill(Color.androidGreen).frame(width: 14, height: 14)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Window size")
                 .help("Window size & rotation")
-                .onHover { hovering in
-                    if hovering {
-                        hoverTask?.cancel()
-                        withAnimation(.easeOut(duration: 0.15)) {
-                            model.sizeMenuVisible = true
-                        }
-                    } else {
-                        hoverTask = Task {
-                            try? await Task.sleep(nanoseconds: 300_000_000)
-                            if !Task.isCancelled {
-                                withAnimation(.easeIn(duration: 0.15)) {
-                                    model.sizeMenuVisible = false
-                                }
-                            }
-                        }
-                    }
+                .popover(isPresented: $model.sizeMenuVisible, arrowEdge: .top) {
+                    sizeMenuContent
                 }
 
                 Spacer()
@@ -911,12 +898,66 @@ private struct ChipBarView: View {
                     .help(model.headlessBoot ? "Pop Out Phone Window" : "Embed Phone Window")
                 }
             }
-            .padding(.leading, 9)
+            // 20pt, not 9 — the row used to sit tight against the 55pt
+            // corner curve (feedback: "位置很尷尬"). Can't fully clear a
+            // 55pt radius from inside a 32pt-tall strip, but this gives it
+            // real breathing room instead of hugging the corner.
+            .padding(.leading, 20)
             .padding(.trailing, 10)
         }
         .opacity(model.chromeHovering ? 1 : 0)
         .allowsHitTesting(model.chromeHovering)
         .ignoresSafeArea()
+    }
+
+    /// Preset-size list, presented as a popover off the green light —
+    /// mirrors cubeconjure's LangPicker exactly (plain button + .popover,
+    /// not SwiftUI's Menu, which collapses its hit area to a point).
+    private var sizeMenuContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Preset Sizes")
+                .font(.system(size: 9)).bold()
+                .foregroundStyle(Color.slateTextDim)
+                .padding(.horizontal, 4)
+
+            Divider().background(Color.white.opacity(0.1))
+
+            Group {
+                sizeMenuButton(title: "Phone (Portrait)", isTablet: false, isLandscape: false)
+                sizeMenuButton(title: "Phone (Landscape)", isTablet: false, isLandscape: true)
+                sizeMenuButton(title: "Tablet (Portrait)", isTablet: true, isLandscape: false)
+                sizeMenuButton(title: "Tablet (Landscape)", isTablet: true, isLandscape: true)
+            }
+        }
+        .padding(6)
+        .frame(width: 140)
+    }
+
+    private func sizeMenuButton(title: String, isTablet: Bool, isLandscape: Bool) -> some View {
+        Button {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                model.isTablet = isTablet
+                model.isLandscape = isLandscape
+                model.refreshStorageStats()
+            }
+            model.sizeMenuVisible = false
+        } label: {
+            HStack {
+                Text(title)
+                    .foregroundStyle(Color.white)
+                Spacer()
+                if model.isTablet == isTablet && model.isLandscape == isLandscape {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Color.androidGreen)
+                }
+            }
+            .font(.caption2)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -1258,7 +1299,6 @@ struct ContentView: View {
     // The shared instance — the app delegate routes Finder-opened APKs here.
     @StateObject private var model = AppModel.shared
     @State private var showCreateSheet = false
-    @State private var hoverTask: Task<Void, Never>? = nil
     @State private var dockHovering = false
     var body: some View {
         ZStack {
@@ -1439,46 +1479,6 @@ struct ContentView: View {
             .frame(width: model.currentWidth, height: model.currentHeight)
             .background(Color.slateDeep.opacity(0.2))
             .background(WindowConfigurator(width: model.currentWidth, height: model.currentHeight)) // Apply NSWindow configurations
-            
-            // Size/rotation menu, dropping down from the green light in the
-            // chip strip above (lightweight, zero event blocking).
-            if model.sizeMenuVisible {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Preset Sizes")
-                        .font(.system(size: 9)).bold()
-                        .foregroundStyle(Color.slateTextDim)
-                        .padding(.horizontal, 4)
-
-                    Divider().background(Color.white.opacity(0.1))
-
-                    Group {
-                        sizeMenuButton(title: "Phone (Portrait)", isTablet: false, isLandscape: false)
-                        sizeMenuButton(title: "Phone (Landscape)", isTablet: false, isLandscape: true)
-                        sizeMenuButton(title: "Tablet (Portrait)", isTablet: true, isLandscape: false)
-                        sizeMenuButton(title: "Tablet (Landscape)", isTablet: true, isLandscape: true)
-                    }
-                }
-                .padding(6)
-                .frame(width: 140)
-                .liquidGlassBackground(cornerRadius: 12)
-                // Under the green light (third traffic-light slot, x≈62).
-                .position(x: 106, y: 90)
-                .onHover { hovering in
-                    if hovering {
-                        hoverTask?.cancel()
-                    } else {
-                        hoverTask = Task {
-                            try? await Task.sleep(nanoseconds: 300_000_000)
-                            if !Task.isCancelled {
-                                withAnimation(.easeIn(duration: 0.15)) {
-                                    model.sizeMenuVisible = false
-                                }
-                            }
-                        }
-                    }
-                }
-                .transition(.opacity)
-            }
             
             // Overlay 2: Progress indicators for background tasks
             if model.isCreating {
@@ -1689,33 +1689,6 @@ struct ContentView: View {
         .buttonStyle(.plain)
         .help(packageName)
         .accessibilityLabel(name)
-    }
-    
-    private func sizeMenuButton(title: String, isTablet: Bool, isLandscape: Bool) -> some View {
-        Button {
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                model.isTablet = isTablet
-                model.isLandscape = isLandscape
-                model.refreshStorageStats()
-            }
-            model.sizeMenuVisible = false
-        } label: {
-            HStack {
-                Text(title)
-                    .foregroundStyle(Color.white)
-                Spacer()
-                if model.isTablet == isTablet && model.isLandscape == isLandscape {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(Color.androidGreen)
-                }
-            }
-            .font(.caption2)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 4)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
 }
 
