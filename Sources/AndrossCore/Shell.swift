@@ -3,10 +3,18 @@ import Foundation
 /// Minimal process runner. Resolves tools via `/usr/bin/env` so it honours the
 /// user's PATH (node, npm, git, …).
 public enum Shell {
-    nonisolated(unsafe) private static var cachedPath: String?
+    /// The child PATH, probed once from the user's login shell.
+    ///
+    /// `static let` (not a hand-rolled cache): every `run*` call reaches this
+    /// through `childEnvironment()`, and those calls fan out across background
+    /// threads. An unsynchronized `var` cache raced — one thread storing the
+    /// String while another retained it handed a half-written reference to
+    /// `Process.environment`, which crashed inside NSDictionary bridging on
+    /// launch. `swift_once` makes the read safe and probes the shell exactly
+    /// once instead of once per racing thread.
+    private static let resolvedPath: String = probeLoginShellPath()
 
-    private static func resolvedPath() -> String {
-        if let cachedPath { return cachedPath }
+    private static func probeLoginShellPath() -> String {
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         let probe = Process()
         probe.executableURL = URL(fileURLWithPath: shell)
@@ -26,13 +34,12 @@ public enum Shell {
             let existing = ProcessInfo.processInfo.environment["PATH"] ?? ""
             result = (extras + [existing]).joined(separator: ":")
         }
-        cachedPath = result
         return result
     }
 
     private static func childEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
-        env["PATH"] = resolvedPath()
+        env["PATH"] = resolvedPath
         return env
     }
 

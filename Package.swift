@@ -15,7 +15,11 @@ let package = Package(
     ],
     targets: [
         // Core business logic: handles Android SDK, AVD lifecycle, and ADB communication.
-        .target(name: "AndrossCore"),
+        .target(name: "AndrossCore", resources: [
+            // Vendored scrcpy-server (Apache-2.0) — pushed to the emulated
+            // device and run there via app_process; see Third-Party/scrcpy.
+            .copy("Resources/scrcpy-server"),
+        ]),
         // Native macOS SwiftUI app interface.
         .executableTarget(name: "AndrossApp", dependencies: [
             "AndrossCore",

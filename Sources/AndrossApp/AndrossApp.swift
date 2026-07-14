@@ -172,9 +172,28 @@ final class AppModel: ObservableObject {
     // Default to Phone Portrait on launch
     @Published var isTablet = false
     @Published var isLandscape = false
-    
-    var currentWidth: CGFloat { phoneWindowSize(isTablet: isTablet, isLandscape: isLandscape).width }
-    var currentHeight: CGFloat { phoneWindowSize(isTablet: isTablet, isLandscape: isLandscape).height }
+
+    /// The app's one window, handed over by WindowConfigurator. Weak: the model
+    /// outlives the window and has no business keeping it alive.
+    weak var mainWindow: NSWindow?
+
+    /// Width / height of the live stream, published by the embedded screen the
+    /// moment scrcpy reports the session's real dimensions. While the screen is
+    /// open the window takes its shape from this instead of the size preset —
+    /// that is what keeps the phone bar-free on any device.
+    @Published var streamAspect: CGFloat?
+
+    var currentWidth: CGFloat { currentWindowSize.width }
+    var currentHeight: CGFloat { currentWindowSize.height }
+
+    /// The preset picks the size; an open screen picks the shape.
+    private var currentWindowSize: CGSize {
+        let preset = phoneWindowSize(isTablet: isTablet, isLandscape: isLandscape)
+        guard activeApp == .screen, let streamAspect else { return preset }
+        let fit = embeddedScreenWindowSize(deviceAspect: streamAspect,
+                                           longSide: max(preset.width, preset.height))
+        return fit.window == .zero ? preset : fit.window
+    }
 
     private var logBuffer = LogBuffer()
     private var refreshTimer: Timer?
@@ -554,15 +573,52 @@ final class AppModel: ObservableObject {
         let apkSize = EmulatorManager.shared.getFileSize(path: url.path)
         let sizeStr = ByteCountFormatter.string(fromByteCount: apkSize, countStyle: .file)
         log("Installing \(url.lastPathComponent) (\(sizeStr))…")
+        let headless = headlessBoot
         Task.detached(priority: .userInitiated) {
-            let ok = EmulatorManager.shared.installAPK(serial: serial, path: url.path) { line, transient in
+            let manager = EmulatorManager.shared
+            // Snapshot first so the new package can be named afterwards: `adb
+            // install` doesn't say what it installed, and reading the name out
+            // of the APK would mean shipping aapt for one string.
+            let before = Set(manager.listThirdPartyPackages(serial: serial, userId: 0))
+            let ok = manager.installAPK(serial: serial, path: url.path) { line, transient in
                 Task { @MainActor in
                     self.log("· " + line, transient: transient)
                 }
             }
+            guard ok else {
+                await MainActor.run {
+                    self.log("Installation of \(url.lastPathComponent) failed.")
+                    self.refreshIdentities()
+                }
+                return
+            }
+
+            // Drop an app in, land in the app. Anything less makes the user go
+            // find what they just installed, on a phone whose home screen this
+            // app exists to keep them out of.
+            let installed = Set(manager.listThirdPartyPackages(serial: serial, userId: 0))
+                .subtracting(before)
+                .first
             await MainActor.run {
-                self.log(ok ? "\(url.lastPathComponent) installed." : "Installation of \(url.lastPathComponent) failed.")
+                self.log("\(url.lastPathComponent) installed.")
                 self.refreshIdentities()
+                if let installed {
+                    self.log("Opening \(AppCatalog.displayName(for: installed))…")
+                }
+            }
+            guard let installed else { return }
+
+            let launched = manager.launchUntilForeground(serial: serial, packageName: installed)
+            await MainActor.run {
+                guard launched else {
+                    self.log("\(AppCatalog.displayName(for: installed)) didn't open — tap it to try again.")
+                    return
+                }
+                // Only when the phone has no window of its own; otherwise the
+                // app is already on screen in it.
+                if headless {
+                    withAnimation(.easeIn(duration: 0.15)) { self.activeApp = .screen }
+                }
             }
         }
     }
@@ -917,15 +973,28 @@ private struct ChipBarView: View {
             .padding(.top, 32)
         }
         .frame(maxHeight: .infinity, alignment: .top)
-        .opacity(model.chromeHovering ? 1 : 0)
+        // Silent while the phone's screen is up: the island carries these same
+        // controls there, and this row would otherwise lay white-on-white glyphs
+        // across the phone's status bar and collide with the island itself.
+        .opacity(model.chromeHovering && model.activeApp != .screen ? 1 : 0)
         .allowsHitTesting(model.chromeHovering)
         .ignoresSafeArea()
     }
 
-    /// Preset-size list, presented as a popover off the green light —
-    /// mirrors cubeconjure's LangPicker exactly (plain button + .popover,
-    /// not SwiftUI's Menu, which collapses its hit area to a point).
-    private var sizeMenuContent: some View {
+    private var sizeMenuContent: some View { SizeMenu(model: model) }
+}
+
+/// Preset-size list, presented as a popover off the green light — mirrors
+/// cubeconjure's LangPicker exactly (plain button + .popover, not SwiftUI's
+/// Menu, which collapses its hit area to a point).
+///
+/// Shared: the green light exists twice now (the chip bar on the home screen,
+/// the island over the phone), and a second copy of this list is a second place
+/// to forget to add a size to.
+struct SizeMenu: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Preset Sizes")
                 .font(.system(size: 9)).bold()
@@ -1272,6 +1341,10 @@ class ConfiguratorNSView: NSView {
     
     private func configureWindow(initial: Bool) {
         guard let window = self.window else { return }
+        // The island's window controls need this exact window — the same reason
+        // the chip bar captures it rather than reaching for NSApp.keyWindow,
+        // which is nil here anyway (a borderless window never becomes key).
+        AppModel.shared.mainWindow = window
         if initial {
             // Borderless: the window contributes zero system-drawn pixels
             // (no NSThemeFrame chrome, no macOS 26 glass backplate), so
@@ -1317,38 +1390,44 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 // Desktop Content Area
                 VStack(spacing: 0) {
-                    // Unified Header Bar (Transparent background + thin divider line)
-                    HStack {
-                        // Left: spacer balancing the fixed traffic-light overlay
-                        Color.clear
-                            .frame(width: 60, height: 12)
+                    // Unified Header Bar (Transparent background + thin divider
+                    // line). The embedded screen does without it: the header only
+                    // ever carried the device name, which the hover chrome already
+                    // shows, and its height came straight out of the phone. Every
+                    // point it takes here is a point the screen shrinks by.
+                    if model.activeApp != .screen {
+                        HStack {
+                            // Left: spacer balancing the fixed traffic-light overlay
+                            Color.clear
+                                .frame(width: 60, height: 12)
 
-                        Spacer()
-                        
-                        // Center: Page Title
-                        if let activeApp = model.activeApp {
-                            Text(activeAppTitle(activeApp))
-                                .font(.headline).bold()
-                                .foregroundStyle(Color.white)
-                        } else {
-                            Text("andross")
-                                .font(.system(.headline, design: .monospaced)).bold()
-                                .foregroundStyle(Color.androidGreen)
+                            Spacer()
+
+                            // Center: Page Title
+                            if let activeApp = model.activeApp {
+                                Text(activeAppTitle(activeApp))
+                                    .font(.headline).bold()
+                                    .foregroundStyle(Color.white)
+                            } else {
+                                Text("andross")
+                                    .font(.system(.headline, design: .monospaced)).bold()
+                                    .foregroundStyle(Color.androidGreen)
+                            }
+
+                            Spacer()
+
+                            // Right: Balance spacer to keep title perfectly centered
+                            Color.clear
+                                .frame(width: 60, height: 12)
                         }
-                        
-                        Spacer()
-                        
-                        // Right: Balance spacer to keep title perfectly centered
-                        Color.clear
-                            .frame(width: 60, height: 12)
+                        .padding(.horizontal, 36)
+                        .padding(.top, 32)
+                        .padding(.bottom, 12)
+                        .background(Color.clear)
+
+                        Divider().background(Color.slateBorder)
                     }
-                    .padding(.horizontal, 36)
-                    .padding(.top, 32)
-                    .padding(.bottom, 12)
-                    .background(Color.clear)
-                    
-                    Divider().background(Color.slateBorder)
-                    
+
                     // Main Content Canvas
                     if let activeApp = model.activeApp {
                         if activeApp == .screen {
@@ -1470,7 +1549,10 @@ struct ContentView: View {
                 
                 // Bottom Android Gesture Navigation Bar Pill — a real Button so
                 // it always wins hit-testing against window-background dragging.
-                if model.activeApp != nil {
+                // Skipped for the embedded screen: the phone streams its own
+                // gesture bar, so ours would be a second one stacked under it,
+                // and the screen's floating pill already carries Back/Home/Exit.
+                if model.activeApp != nil && model.activeApp != .screen {
                     Button {
                         withAnimation(.easeOut(duration: 0.15)) {
                             model.activeApp = nil

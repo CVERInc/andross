@@ -170,6 +170,87 @@ expectEqual(phoneWindowSize(isTablet: false, isLandscape: true), CGSize(width: 8
 expectEqual(phoneWindowSize(isTablet: true, isLandscape: false), CGSize(width: 500, height: 800), "tablet portrait")
 expectEqual(phoneWindowSize(isTablet: true, isLandscape: true), CGSize(width: 800, height: 500), "tablet landscape")
 
+// MARK: scrcpy text injection (INJECT_TEXT vs SET_CLIPBOARD)
+
+// ASCII rides INJECT_TEXT (type 1): 4-byte length, then the UTF-8 bytes.
+let asciiInjection = ScrcpyControl.textInjection("hi")
+expectEqual(asciiInjection, [1, 0, 0, 0, 2, 0x68, 0x69],
+            "textInjection sends ASCII as INJECT_TEXT")
+
+// CJK cannot be key-evented on the device, so it must go out as SET_CLIPBOARD
+// (type 9) with the paste flag — landing "123" out of "測試123" is the bug this
+// guards against.
+let cjkInjection = ScrcpyControl.textInjection("測")
+expectEqual(cjkInjection.first, 9, "textInjection sends non-ASCII as SET_CLIPBOARD, not INJECT_TEXT")
+expectEqual(Array(cjkInjection[1...8]), [0, 0, 0, 0, 0, 0, 0, 0],
+            "SET_CLIPBOARD carries an 8-byte sequence (0 = no ack wanted)")
+expectEqual(cjkInjection[9], 1, "SET_CLIPBOARD sets the paste flag, so the phone pastes it immediately")
+expectEqual(Array(cjkInjection[10...13]), [0, 0, 0, 3],
+            "SET_CLIPBOARD's length is UTF-8 bytes (測 is 3), not characters")
+expectEqual(Array(cjkInjection[14...]), Array("測".utf8),
+            "SET_CLIPBOARD carries the text as UTF-8")
+
+// Mixed text is only as typable as its worst character.
+expectEqual(ScrcpyControl.textInjection("測試123").first, 9,
+            "textInjection sends mixed CJK+ASCII over the clipboard — INJECT_TEXT would drop the CJK half")
+
+// MARK: routeMacKey
+
+expectEqual(routeMacKey(virtualKey: 0, characters: "測試123", commandHeld: false, clipboard: nil),
+            .text("測試123"),
+            "routeMacKey sends CJK straight through as text — no escaping, no keycode table")
+expectEqual(routeMacKey(virtualKey: 53, characters: "\u{1B}", commandHeld: false, clipboard: nil),
+            .keycode(4),
+            "routeMacKey maps Escape to Android BACK")
+expectEqual(routeMacKey(virtualKey: 51, characters: "\u{7F}", commandHeld: false, clipboard: nil),
+            .keycode(67),
+            "routeMacKey maps Backspace to Android DEL")
+expectEqual(routeMacKey(virtualKey: 36, characters: "\r", commandHeld: false, clipboard: nil),
+            .keycode(66),
+            "routeMacKey maps Return to Android ENTER")
+expectEqual(routeMacKey(virtualKey: 9, characters: "v", commandHeld: true, clipboard: "貼上的字"),
+            .text("貼上的字"),
+            "routeMacKey turns Cmd+V into the Mac clipboard's text — the phone's own clipboard isn't the one you copied from")
+expectEqual(routeMacKey(virtualKey: 9, characters: "v", commandHeld: true, clipboard: ""),
+            .ignore,
+            "routeMacKey ignores Cmd+V with an empty clipboard")
+expectEqual(routeMacKey(virtualKey: 12, characters: "q", commandHeld: true, clipboard: "x"),
+            .ignore,
+            "routeMacKey leaves other Command shortcuts (Cmd+Q) to macOS")
+expectEqual(routeMacKey(virtualKey: 0, characters: "\u{1}", commandHeld: false, clipboard: nil),
+            .ignore,
+            "routeMacKey drops control characters rather than typing them")
+expectEqual(routeMacKey(virtualKey: 0, characters: nil, commandHeld: false, clipboard: nil),
+            .ignore,
+            "routeMacKey ignores a key with no characters")
+
+// MARK: embeddedScreenWindowSize
+
+// A 720x1600 stream (the emulator's own 1080x2400, capped by max_size) inside
+// an 800pt-long window: the screen takes the full 780pt between the bezels and
+// the window's short edge follows from the device — no leftover bars either way,
+// and no strip reserved for chrome (the island rides the status bar instead).
+let portraitFit = embeddedScreenWindowSize(deviceAspect: 720.0 / 1600.0, longSide: 800)
+expect(abs(portraitFit.screen.height - 780) < 0.001 && abs(portraitFit.screen.width - 351) < 0.001,
+       "embeddedScreenWindowSize fills the long edge and derives the short one from the device")
+expect(abs(portraitFit.window.height - 800) < 0.001 && abs(portraitFit.window.width - 371) < 0.001,
+       "embeddedScreenWindowSize wraps the screen in a uniform bezel")
+expect(abs(portraitFit.screen.width / portraitFit.screen.height - 0.45) < 0.001,
+       "embeddedScreenWindowSize keeps the device's aspect exactly — the bar-free condition")
+
+// Orientation follows the device, not the caller: a landscape stream turns the
+// long edge into the width, so the window lies down with the phone.
+let landscapeFit = embeddedScreenWindowSize(deviceAspect: 1600.0 / 720.0, longSide: 800)
+expect(abs(landscapeFit.screen.width - 780) < 0.001 && abs(landscapeFit.screen.height - 351) < 0.001,
+       "embeddedScreenWindowSize lays the screen down for a landscape stream")
+expect(landscapeFit.window.width > landscapeFit.window.height,
+       "embeddedScreenWindowSize gives a landscape stream a landscape window")
+
+expectEqual(embeddedScreenWindowSize(deviceAspect: 0, longSide: 800).window, .zero,
+            "embeddedScreenWindowSize rejects a zero aspect")
+expectEqual(embeddedScreenWindowSize(deviceAspect: 0.45, longSide: 10).window, .zero,
+            "embeddedScreenWindowSize rejects a window smaller than its own bezels")
+
 // MARK: system image / API level
 
 expectEqual(EmulatorManager.SystemType.googlePlay.sdkImage(apiLevel: 34),
@@ -302,6 +383,139 @@ do {
     expectEqual(ProcessRegistry.pruned([p1, p2]).count, 0,
                 "ProcessRegistry.pruned is empty after terminate+reap")
 }
+
+// MARK: scrcpy video protocol parsing
+
+expectEqual(AndrossParse.scrcpyCodecId(from: Array("h264".utf8)), 0x68_32_36_34,
+            "scrcpyCodecId decodes the big-endian ASCII codec id")
+expectEqual(AndrossParse.scrcpyCodecId(from: [0x68, 0x32]), nil,
+            "scrcpyCodecId nil on a short header")
+expectEqual(AndrossParse.scrcpyCodecName(from: 0x68_32_36_34), "h264",
+            "scrcpyCodecName round-trips back to ASCII")
+
+func sessionMetaBytes(flags: UInt32, width: UInt32, height: UInt32) -> [UInt8] {
+    func u32(_ v: UInt32) -> [UInt8] { [UInt8(v >> 24), UInt8((v >> 16) & 0xff), UInt8((v >> 8) & 0xff), UInt8(v & 0xff)] }
+    return u32(flags) + u32(width) + u32(height)
+}
+let sessionMeta = AndrossParse.scrcpySessionMeta(from: sessionMetaBytes(flags: 0x8000_0001, width: 1080, height: 2400))
+expect(sessionMeta?.width == 1080 && sessionMeta?.height == 2400 && sessionMeta?.isClientResize == true,
+       "scrcpySessionMeta parses dimensions and the client-resize bit")
+let sessionMetaNoResize = AndrossParse.scrcpySessionMeta(from: sessionMetaBytes(flags: 0x8000_0000, width: 1080, height: 2400))
+expectEqual(sessionMetaNoResize?.isClientResize, false, "scrcpySessionMeta clears isClientResize when bit 0 is unset")
+expectEqual(AndrossParse.scrcpySessionMeta(from: sessionMetaBytes(flags: 0, width: 0, height: 2400)), nil,
+            "scrcpySessionMeta rejects a zero width")
+expectEqual(AndrossParse.scrcpySessionMeta(from: [0, 0]), nil,
+            "scrcpySessionMeta nil on a short header")
+
+func frameHeaderBytes(ptsAndFlags: UInt64, packetSize: UInt32) -> [UInt8] {
+    var bytes: [UInt8] = []
+    for shift in stride(from: 56, through: 0, by: -8) { bytes.append(UInt8((ptsAndFlags >> shift) & 0xff)) }
+    bytes += [UInt8(packetSize >> 24), UInt8((packetSize >> 16) & 0xff), UInt8((packetSize >> 8) & 0xff), UInt8(packetSize & 0xff)]
+    return bytes
+}
+let configFlag: UInt64 = 1 << 62
+let keyFrameFlag: UInt64 = 1 << 61
+let configHeader = AndrossParse.scrcpyFrameHeader(from: frameHeaderBytes(ptsAndFlags: configFlag, packetSize: 42))
+expect(configHeader?.isConfig == true && configHeader?.pts == 0 && configHeader?.packetSize == 42,
+       "scrcpyFrameHeader recognizes a config (SPS/PPS) packet with zero pts")
+let keyFrameHeader = AndrossParse.scrcpyFrameHeader(from: frameHeaderBytes(ptsAndFlags: keyFrameFlag | 123_456, packetSize: 900))
+expect(keyFrameHeader?.isConfig == false && keyFrameHeader?.isKeyFrame == true && keyFrameHeader?.pts == 123_456,
+       "scrcpyFrameHeader strips the key-frame bit out of pts")
+let plainFrameHeader = AndrossParse.scrcpyFrameHeader(from: frameHeaderBytes(ptsAndFlags: 999, packetSize: 10))
+expect(plainFrameHeader?.isConfig == false && plainFrameHeader?.isKeyFrame == false && plainFrameHeader?.pts == 999,
+       "scrcpyFrameHeader handles a plain (non-key) frame")
+expectEqual(AndrossParse.scrcpyFrameHeader(from: frameHeaderBytes(ptsAndFlags: 0, packetSize: UInt32(AndrossParse.maxScrcpyPacketSize) + 1)), nil,
+            "scrcpyFrameHeader rejects a packet size past the sanity ceiling")
+
+var deviceNameBuf = [UInt8](repeating: 0, count: 64)
+let nameBytes = Array("line-test".utf8)
+deviceNameBuf.replaceSubrange(0..<nameBytes.count, with: nameBytes)
+expectEqual(AndrossParse.scrcpyDeviceName(from: deviceNameBuf), "line-test",
+            "scrcpyDeviceName stops at the NUL pad")
+expectEqual(AndrossParse.scrcpyDeviceName(from: [UInt8](repeating: 0, count: 10)), nil,
+            "scrcpyDeviceName nil on a short buffer")
+
+// MARK: scrcpy control message serialization
+
+let touchDown = ScrcpyControl.touchEvent(action: .down, x: 100, y: 200, screenWidth: 1080, screenHeight: 2400)
+expectEqual(touchDown.count, 32, "touchEvent is 32 bytes (1 type + 1 action + 8 pointerId + 8 xy + 4 wh + 2 pressure + 4 + 4 buttons)")
+expectEqual(touchDown[0], 2, "touchEvent leads with TYPE_INJECT_TOUCH_EVENT = 2")
+expectEqual(touchDown[1], ScrcpyControl.TouchAction.down.rawValue, "touchEvent encodes the DOWN action")
+// pointerId (8 bytes at offset 2): defaults to the generic-finger id (all-but-one bits set).
+expectEqual(Array(touchDown[2..<10]), [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe],
+            "touchEvent defaults to SC_POINTER_ID_GENERIC_FINGER, big-endian")
+// x (int32 at offset 10) = 100
+expectEqual(Array(touchDown[10..<14]), [0, 0, 0, 100], "touchEvent encodes x big-endian")
+// layout after pointerId(2..10): x(10..14) y(14..18) screenW(18..20) screenH(20..22) pressure(22..24)
+expectEqual(Array(touchDown[22..<24]), [0xff, 0xff], "touchEvent encodes full pressure as the reserved 0xFFFF")
+
+let touchMove = ScrcpyControl.touchEvent(action: .move, pointerId: 7, x: -5, y: 0, screenWidth: 360, screenHeight: 800, pressure: 0)
+expectEqual(Array(touchMove[10..<14]), [0xff, 0xff, 0xff, 0xfb], "touchEvent encodes a negative x as two's complement")
+expectEqual(Array(touchMove[22..<24]), [0, 0], "touchEvent encodes zero pressure as 0x0000")
+
+let keyDown = ScrcpyControl.keycodeEvent(action: .down, keycode: 66) // KEYCODE_ENTER
+expectEqual(keyDown, [0, 0, 0, 0, 0, 66, 0, 0, 0, 0, 0, 0, 0, 0], "keycodeEvent encodes type+action+keycode+repeat+metaState")
+
+let shortText = ScrcpyControl.textEvent("hi")
+expectEqual(shortText, [1, 0, 0, 0, 2, UInt8(ascii: "h"), UInt8(ascii: "i")], "textEvent length-prefixes UTF-8 bytes")
+
+let cjkText = ScrcpyControl.textEvent("測試123")
+expectEqual(Array(cjkText.dropFirst(5)), Array("測試123".utf8), "textEvent passes CJK straight through as UTF-8")
+
+let longText = String(repeating: "x", count: 500)
+let truncated = ScrcpyControl.textEvent(longText)
+expectEqual(truncated.count, 1 + 4 + 300, "textEvent truncates at 300 UTF-8 bytes, matching the reference client")
+
+// A multi-byte UTF-8 sequence straddling the 300-byte cut must not be split mid-codepoint.
+let straddling = String(repeating: "a", count: 299) + "測測測"
+let truncatedStraddle = ScrcpyControl.textEvent(straddling)
+let payload = Array(truncatedStraddle.dropFirst(5))
+expect(String(bytes: payload, encoding: .utf8) != nil,
+       "textEvent backs off the truncation point so it never splits a UTF-8 codepoint")
+
+let backEvent = ScrcpyControl.backOrScreenOn(action: .down)
+expectEqual(backEvent, [4, 0], "backOrScreenOn encodes TYPE_BACK_OR_SCREEN_ON + action")
+
+// Layout: type(1) x(4) y(4) screenW(2) screenH(2) hScroll(2) vScroll(2) buttons(4) = 21 bytes.
+let scroll = ScrcpyControl.scrollEvent(x: 50, y: 60, screenWidth: 1080, screenHeight: 2400, hScroll: 0, vScroll: 16)
+expectEqual(scroll.count, 21, "scrollEvent is 21 bytes")
+expectEqual(scroll[0], 3, "scrollEvent leads with TYPE_INJECT_SCROLL_EVENT = 3")
+expectEqual(Array(scroll[13..<15]), [0, 0], "scrollEvent encodes zero hScroll as 0")
+expectEqual(Array(scroll[15..<17]), [0x7f, 0xff], "scrollEvent clamps full-range vScroll to the max positive fixed-point value")
+
+// MARK: H.264 Annex-B <-> AVCC conversion
+
+let threeByteSC: [UInt8] = [0, 0, 1]
+let fourByteSC: [UInt8] = [0, 0, 0, 1]
+let sps: [UInt8] = [0x67, 0x42, 0x00, 0x1f]
+let pps: [UInt8] = [0x68, 0xce, 0x3c, 0x80]
+let idrSlice: [UInt8] = [0x65, 0x88, 0x84, 0x00]
+
+let configPacket = fourByteSC + sps + fourByteSC + pps
+let configUnits = AndrossParse.splitAnnexBNALUnits(configPacket)
+expectEqual(configUnits.count, 2, "splitAnnexBNALUnits finds both SPS and PPS in a config packet")
+expectEqual(configUnits.first ?? [], sps, "splitAnnexBNALUnits extracts the SPS bytes exactly")
+expectEqual(configUnits.last ?? [], pps, "splitAnnexBNALUnits extracts the PPS bytes exactly")
+expectEqual(AndrossParse.h264NALUnitType(configUnits[0]), 7, "h264NALUnitType recognizes SPS (7)")
+expectEqual(AndrossParse.h264NALUnitType(configUnits[1]), 8, "h264NALUnitType recognizes PPS (8)")
+
+let mixedStartCodes = threeByteSC + idrSlice
+let mixedUnits = AndrossParse.splitAnnexBNALUnits(mixedStartCodes)
+expectEqual(mixedUnits, [idrSlice], "splitAnnexBNALUnits handles a 3-byte start code")
+expectEqual(AndrossParse.h264NALUnitType(idrSlice), 5, "h264NALUnitType recognizes an IDR slice (5)")
+
+expectEqual(AndrossParse.splitAnnexBNALUnits([]), [], "splitAnnexBNALUnits nil-safe on empty input")
+expectEqual(AndrossParse.splitAnnexBNALUnits([0, 0, 0]), [], "splitAnnexBNALUnits returns nothing without a real start code")
+
+let avcc = AndrossParse.nalUnitsToAVCC([sps, pps])
+let expectedAVCC: [UInt8] = [0, 0, 0, 4] + sps + [0, 0, 0, 4] + pps
+expectEqual(avcc, expectedAVCC, "nalUnitsToAVCC prefixes each unit with its own 4-byte big-endian length")
+
+// Round-trip: split an AVCC-style buffer's Annex-B source, convert back, get the same bytes.
+let roundTrip = AndrossParse.nalUnitsToAVCC(AndrossParse.splitAnnexBNALUnits(configPacket))
+expectEqual(roundTrip, expectedAVCC, "Annex-B -> split -> AVCC round-trips to the same length-prefixed form")
+
+expectEqual(AndrossParse.h264NALUnitType([]), nil, "h264NALUnitType nil on an empty unit")
 
 // MARK: result
 

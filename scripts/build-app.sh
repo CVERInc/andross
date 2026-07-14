@@ -20,6 +20,20 @@ mkdir -p "$DEST/Contents/MacOS" "$DEST/Contents/Resources"
 cp "$BIN" "$DEST/Contents/MacOS/AndrossApp"
 cp assets/andross.icns "$DEST/Contents/Resources/andross.icns"
 
+# SwiftPM resource bundles (they carry scrcpy-server, which the embedded screen
+# cannot start without). Without this the .app still runs on the machine that
+# built it — Bundle.module quietly falls back to the .build directory — and
+# breaks on every other one, which is the only kind of machine a release ever
+# lands on. Copy them, then check the payload is really in there.
+for bundle in ".build/$CONFIG"/*.bundle; do
+  [ -e "$bundle" ] && cp -R "$bundle" "$DEST/Contents/Resources/"
+done
+
+if [ ! -f "$DEST/Contents/Resources/andross_AndrossCore.bundle/scrcpy-server" ]; then
+  echo "✗ scrcpy-server is missing from the app bundle — the embedded screen would be dead on arrival." >&2
+  exit 1
+fi
+
 cat > "$DEST/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

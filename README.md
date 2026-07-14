@@ -11,8 +11,9 @@ and drives Google's official emulator engine directly through
 
 > **Status: v0.1.0 — early, GUI-only.** The app builds and runs; core flows
 > (create device, sandboxes, install/launch apps, clean uninstall) are
-> exercised by an integration test. The in-window phone screen is a **beta**
-> (raw-frame streaming over adb). Not yet signed/notarized for distribution.
+> exercised by an integration test. The in-window phone screen streams over
+> scrcpy — hardware H.264, live touch, ~60fps on an Apple-silicon host. Audio
+> is not carried yet. Not yet signed/notarized for distribution.
 
 ---
 
@@ -113,3 +114,7 @@ time you create a device, so it is never baked into the build.
 ## License
 
 MIT © CVER Inc. See [LICENSE](LICENSE).
+
+Vendors [scrcpy-server](https://github.com/Genymobile/scrcpy) (Apache License
+2.0) to stream the embedded device screen — see
+[Third-Party/scrcpy](Third-Party/scrcpy).
