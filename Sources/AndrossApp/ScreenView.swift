@@ -3,6 +3,17 @@ import AppKit
 import AndrossCore
 import Signet
 
+/// The moment a scroll event belongs to, distilled from NSEvent's
+/// `phase`/`momentumPhase` into the three moments a finger actually has —
+/// plus `wheel` for a notched mouse, which reports no phase at all and so
+/// needs an idle timer to know when the finger has left.
+///
+/// This is the whole reason a two-finger swipe can pull the shade the way a
+/// thumb does: `.begin`/`.move`/`.end` map straight onto touch down/move/up,
+/// so the finger lifts exactly when the real fingers leave the trackpad —
+/// not after an arbitrary pause, which used to drop the shade mid-pull.
+private enum ScrollMoment { case begin, move, end, momentum, wheel }
+
 /// AppKit interaction layer for the embedded screen. A plain SwiftUI gesture
 /// can't be used here: the window is movable-by-background, and a mouse-down
 /// on a non-control view starts a window drag instead of the gesture. This
@@ -14,13 +25,13 @@ private struct ScreenInteraction: NSViewRepresentable {
     let onDown: (_ point: CGPoint, _ viewSize: CGSize) -> Void
     let onMove: (_ point: CGPoint, _ viewSize: CGSize) -> Void
     let onUp: (_ point: CGPoint, _ viewSize: CGSize) -> Void
-    let onScroll: (_ point: CGPoint, _ viewSize: CGSize, _ deltaX: CGFloat, _ deltaY: CGFloat) -> Void
+    let onScroll: (_ point: CGPoint, _ viewSize: CGSize, _ deltaX: CGFloat, _ deltaY: CGFloat, _ moment: ScrollMoment) -> Void
 
     final class InteractionView: NSView {
         var onDown: ((CGPoint, CGSize) -> Void)?
         var onMove: ((CGPoint, CGSize) -> Void)?
         var onUp: ((CGPoint, CGSize) -> Void)?
-        var onScroll: ((CGPoint, CGSize, CGFloat, CGFloat) -> Void)?
+        var onScroll: ((CGPoint, CGSize, CGFloat, CGFloat, ScrollMoment) -> Void)?
         private var tracking = false
 
         override var mouseDownCanMoveWindow: Bool { false }
@@ -55,11 +66,32 @@ private struct ScreenInteraction: NSViewRepresentable {
             let scale: CGFloat = event.hasPreciseScrollingDeltas ? 1 : 16
             let deltaX = event.scrollingDeltaX * scale
             let deltaY = event.scrollingDeltaY * scale
-            guard deltaX != 0 || deltaY != 0 else { return }
+
+            // Distil the raw phases into one moment. A notched wheel carries no
+            // phase at all (both sets empty) — that's the `.wheel` fallback.
+            let moment: ScrollMoment
+            if !event.momentumPhase.isEmpty {
+                moment = .momentum
+            } else if event.phase.contains(.began) || event.phase.contains(.mayBegin) {
+                moment = .begin
+            } else if event.phase.contains(.ended) || event.phase.contains(.cancelled) {
+                moment = .end
+            } else if event.phase.contains(.changed) {
+                moment = .move
+            } else {
+                moment = .wheel
+            }
+
+            // A .begin or .end can legitimately carry a zero delta — those still
+            // have to open or close the finger — so only a pure move is dropped
+            // for being empty.
+            if (moment == .move || moment == .wheel || moment == .momentum),
+               deltaX == 0, deltaY == 0 { return }
+
             // Not negated: macOS already flips the sign for "natural" scrolling,
             // so passing it through is what makes the phone follow the same
             // direction as the rest of the user's Mac.
-            onScroll?(convert(event.locationInWindow, from: nil), bounds.size, deltaX, deltaY)
+            onScroll?(convert(event.locationInWindow, from: nil), bounds.size, deltaX, deltaY, moment)
         }
 
         // No keyDown override here on purpose. This window is borderless, so
@@ -156,8 +188,8 @@ struct ScreenAppView: View {
                                     onDown: { point, viewSize in sendTouch(.down, at: point, in: viewSize) },
                                     onMove: { point, viewSize in sendTouch(.move, at: point, in: viewSize) },
                                     onUp: { point, viewSize in sendTouch(.up, at: point, in: viewSize) },
-                                    onScroll: { point, viewSize, dx, dy in
-                                        sendScroll(at: point, in: viewSize, deltaX: dx, deltaY: dy)
+                                    onScroll: { point, viewSize, dx, dy, moment in
+                                        sendScroll(at: point, in: viewSize, deltaX: dx, deltaY: dy, moment: moment)
                                     }
                                 )
                             )
@@ -291,21 +323,42 @@ struct ScreenAppView: View {
     /// velocity of those moves the way it reads a thumb's, which is where the
     /// fling comes from for free — and it works in apps that ignore a wheel
     /// entirely, which on a phone is most of them.
-    private func sendScroll(at viewPoint: CGPoint, in viewSize: CGSize, deltaX: CGFloat, deltaY: CGFloat) {
+    private func sendScroll(at viewPoint: CGPoint, in viewSize: CGSize, deltaX: CGFloat, deltaY: CGFloat, moment: ScrollMoment) {
         guard devicePixels.width > 0, devicePixels.height > 0 else { return }
-        let fitted = fittedDeviceRect(devicePixels: devicePixels, container: viewSize)
-        guard fitted.contains(viewPoint) else { return }
 
-        // The gesture lives in view coordinates and is converted on the way out,
-        // so the same touch mapping the mouse uses applies here too.
+        // Momentum is macOS coasting *after* the fingers have already left the
+        // glass. The touch finger is lifted by now (we lift on `.end`), and
+        // replaying it would pit macOS's inertia against Android's own fling —
+        // two physics engines on one list. Drop it; let the device coast.
+        if moment == .momentum { return }
+
+        let fitted = fittedDeviceRect(devicePixels: devicePixels, container: viewSize)
+
+        // Fingers left the trackpad: lift right here, carrying the last move's
+        // velocity, so Android flings from a real release instead of a timer's
+        // guess. No momentum events follow this into injection (dropped above).
+        if moment == .end {
+            scrollLift?.cancel()
+            scrollLift = nil
+            if let finger = scrollFinger {
+                sendTouch(.up, at: finger, in: viewSize)
+                scrollFinger = nil
+            }
+            return
+        }
+
+        // .begin / .move / .wheel all continue — or, on the first event, open —
+        // the finger. The gesture lives in view coordinates and is converted on
+        // the way out, so the same mapping the mouse uses applies here too.
         if scrollFinger == nil {
+            guard fitted.contains(viewPoint) else { return }
             scrollFinger = viewPoint
             sendTouch(.down, at: viewPoint, in: viewSize)
         }
         // macOS reports scroll deltas the direction the *content* should move,
         // which is the direction the finger goes. Pass them straight through.
-        let moved = CGPoint(x: (scrollFinger?.x ?? viewPoint.x) + deltaX,
-                            y: (scrollFinger?.y ?? viewPoint.y) + deltaY)
+        let base = scrollFinger ?? viewPoint
+        let moved = CGPoint(x: base.x + deltaX, y: base.y + deltaY)
         // Keep the finger on the glass: a scroll that runs past the edge would
         // otherwise map outside the screen and be dropped mid-gesture.
         let clamped = CGPoint(x: min(max(moved.x, fitted.minX + 1), fitted.maxX - 1),
@@ -313,16 +366,20 @@ struct ScreenAppView: View {
         scrollFinger = clamped
         sendTouch(.move, at: clamped, in: viewSize)
 
-        // Lift the finger once the wheel goes quiet. Each event pushes the
-        // deadline out, so one continuous flick stays one continuous gesture.
-        scrollLift?.cancel()
-        let lift = DispatchWorkItem {
-            guard let finger = scrollFinger else { return }
-            sendTouch(.up, at: finger, in: viewSize)
-            scrollFinger = nil
+        // A notched wheel never says when it stopped — no `.end` will come — so
+        // it still needs the idle timer: lift once the wheel goes quiet, each
+        // event pushing the deadline out so one continuous flick stays one
+        // gesture. A trackpad closes precisely on `.end`, so it never gets here.
+        if moment == .wheel {
+            scrollLift?.cancel()
+            let lift = DispatchWorkItem {
+                guard let finger = scrollFinger else { return }
+                sendTouch(.up, at: finger, in: viewSize)
+                scrollFinger = nil
+            }
+            scrollLift = lift
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: lift)
         }
-        scrollLift = lift
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: lift)
     }
 
     private func sendText(_ text: String) {
