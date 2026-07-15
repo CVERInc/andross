@@ -314,15 +314,18 @@ final class AppModel: ObservableObject {
 
     // MARK: - Persistent activity log (~/.andross_tmp/andross.log)
 
-    static let logFileURL: URL = {
+    // Pure file I/O with no actor state — kept `nonisolated` so the serial
+    // queue's @Sendable closures can touch it without tripping strict
+    // concurrency (CI builds with complete checking and treats it as an error).
+    nonisolated static let logFileURL: URL = {
         let dir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".andross_tmp")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("andross.log")
     }()
-    static let logFileQueue = DispatchQueue(label: "andross.logfile")
+    nonisolated static let logFileQueue = DispatchQueue(label: "andross.logfile")
 
     /// Append one timestamped line, capping the file so it can't grow forever.
-    static func persistLog(_ message: String) {
+    nonisolated static func persistLog(_ message: String) {
         let url = logFileURL
         logFileQueue.async {
             let fmt = DateFormatter()
