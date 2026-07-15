@@ -91,6 +91,13 @@ struct AndrossApp: App {
     }
 }
 
+/// Human byte size, but an em dash for zero — ByteCountFormatter renders 0 as
+/// the literal "Zero KB", which in a storage row reads like a failure, not
+/// "nothing here".
+func humanBytes(_ bytes: Int64) -> String {
+    bytes <= 0 ? "—" : ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+}
+
 // GUI State Control Model
 @MainActor
 final class AppModel: ObservableObject {
@@ -133,12 +140,13 @@ final class AppModel: ObservableObject {
     @Published var newProfile = 1 // 1: Phone Portrait, 2: Phone Landscape, 3: Tablet Portrait, 4: Tablet Landscape
     @Published var newAPILevel = EmulatorManager.defaultAPILevel
     
-    // Clean uninstallation configuration
+    // Clean uninstallation configuration. Destructive boxes start unchecked —
+    // an uninstall panel shouldn't sit pre-armed to erase every phone.
     @Published var showUninstallSheet = false
-    @Published var uninstallDeleteAVDs = true
+    @Published var uninstallDeleteAVDs = false
     @Published var uninstallSdk = false
     @Published var uninstallJava = false
-    @Published var uninstallTemp = true
+    @Published var uninstallTemp = false
     
     // Desktop layout state — system surfaces live in the dock; the home
     // grid belongs to the user's own Android apps.
@@ -240,6 +248,13 @@ final class AppModel: ObservableObject {
                 if self.selectedAVD == nil {
                     self.selectedAVD = list.first
                 }
+                // Invariant: no phones → no home-grid cache. Enforced on every
+                // refresh (not just on delete) so a phone removed in a past
+                // session can't leave ghost tiles that boot nothing.
+                if list.isEmpty && !self.cachedPackages.isEmpty {
+                    self.cachedPackages = []
+                    UserDefaults.standard.removeObject(forKey: "cachedPackages")
+                }
             }
         }
         refreshIdentities()
@@ -274,10 +289,11 @@ final class AppModel: ObservableObject {
             let tempPath = URL(fileURLWithPath: home).appendingPathComponent(".andross_tmp").path
             let tempSize = EmulatorManager.shared.getDirectorySize(path: tempPath)
             
-            // Format sizes
-            let appSizeStr = ByteCountFormatter.string(fromByteCount: appSize, countStyle: .file)
-            let avdSizeStr = ByteCountFormatter.string(fromByteCount: avdSize, countStyle: .file)
-            let tempSizeStr = ByteCountFormatter.string(fromByteCount: tempSize, countStyle: .file)
+            // Format sizes — a dash for nothing, not ByteCountFormatter's
+            // literal "Zero KB", which reads like an error string.
+            let appSizeStr = humanBytes(appSize)
+            let avdSizeStr = humanBytes(avdSize)
+            let tempSizeStr = humanBytes(tempSize)
             
             // 4. Query third-party packages of the active identity if an emulator is running
             var statsList: [EmulatorManager.AppStorageStats] = []
@@ -779,24 +795,42 @@ final class AppModel: ObservableObject {
     func deleteSelected() {
         guard let name = selectedAVD else { return }
         let alert = NSAlert()
-        alert.messageText = "Delete virtual device [\(name)]?"
-        alert.informativeText = "This action will permanently erase all data on the virtual phone. This cannot be undone."
-        alert.alertStyle = .critical
-        alert.addButton(withTitle: "Delete")
+        alert.messageText = "Move [\(name)] to the Trash?"
+        alert.informativeText = "This moves the phone and all its data to the Trash. It stays recoverable until you empty the Trash."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Move to Trash")
         alert.addButton(withTitle: "Cancel")
-        
+
         if alert.runModal() == .alertFirstButtonReturn {
-            log("Deleting virtual device [\(name)]...")
+            log("Moving [\(name)] to the Trash…")
             Task.detached(priority: .userInitiated) {
-                let res = EmulatorManager.shared.deleteAVD(name: name)
+                // Shut down first: a running phone holds its .avd files open, so
+                // they can't be trashed cleanly out from under it.
+                _ = EmulatorManager.shared.stopAll()
+                var retries = 0
+                while EmulatorManager.shared.connectedEmulators().count > 0 && retries < 20 {
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    retries += 1
+                }
+                let ok = EmulatorManager.shared.deleteAVD(name: name)
+                // Read the list back here, synchronously, so the ghost-cache
+                // decision sees the truth — refreshAVDs() dispatches and would
+                // still report the old, non-empty list this same tick.
+                let remaining = EmulatorManager.shared.listAVDs()
                 await MainActor.run {
-                    if res.ok {
-                        self.log("Successfully deleted device.")
-                    } else {
-                        self.log("Deletion failed: " + res.stderr)
+                    self.log(ok ? "Moved [\(name)] to the Trash."
+                               : "Couldn't move [\(name)] to the Trash.")
+                    self.avds = remaining
+                    self.selectedAVD = remaining.first
+                    // A deleted phone's apps must not linger on the home grid as
+                    // ghosts that boot nothing when tapped. The cache is a single
+                    // last-known set, not keyed per phone, so it clears only once
+                    // the last phone is gone.
+                    if remaining.isEmpty {
+                        self.cachedPackages = []
+                        UserDefaults.standard.removeObject(forKey: "cachedPackages")
                     }
-                    self.selectedAVD = nil
-                    self.refreshAVDs()
+                    self.refreshIdentities()
                 }
             }
         }
@@ -1597,6 +1631,10 @@ struct ContentView: View {
                                 }
                             }
                         }
+                        // Clear the island's top strip: the home content starts
+                        // at the window's top edge and the status line otherwise
+                        // reads half-hidden behind the notch bar.
+                        .padding(.top, CustomGlassView.stripHeight)
                         .background(Color.clear)
                     }
                 }
@@ -2200,7 +2238,7 @@ struct SettingsAppView: View {
                         .font(.caption2)
                         .foregroundStyle(Color.slateTextDim)
                         .toggleStyle(.checkbox)
-                    Text("Beta — boots without a separate emulator window; the phone lives in the Screen view (a few frames per second).")
+                    Text("Boots without a separate emulator window — the phone lives here in the Screen view.")
                         .font(.system(size: 8))
                         .foregroundStyle(Color.slateTextDim.opacity(0.7))
                         .padding(.bottom, 4)
@@ -2228,7 +2266,7 @@ struct SettingsAppView: View {
                 } label: {
                     HStack {
                         Spacer()
-                        Label("Shut Down All Phones", systemImage: "stop.circle.fill")
+                        Label("Shut Down Phone", systemImage: "stop.circle.fill")
                             .font(.caption).bold()
                         Spacer()
                     }
@@ -2238,24 +2276,20 @@ struct SettingsAppView: View {
                 .controlSize(.small)
             }
 
-            // Section 5: Clean uninstall
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Uninstall")
-                    .font(.caption).bold()
-                    .foregroundStyle(Color.white)
-
+            // Section 5: Clean uninstall — folded away by default so a panel
+            // of erase-everything checkboxes isn't sitting open in Settings.
+            DisclosureGroup("Uninstall andross…") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Toggle("Delete all virtual phones and their data (~/.android)", isOn: $model.uninstallDeleteAVDs)
+                    Toggle("Delete all phones and their data", isOn: $model.uninstallDeleteAVDs)
                     Toggle("Remove the Android engine (Homebrew)", isOn: $model.uninstallSdk)
                     Toggle("Remove the Java runtime (Homebrew)", isOn: $model.uninstallJava)
-                    Toggle("Delete temporary files (~/.andross_tmp)", isOn: $model.uninstallTemp)
+                    Toggle("Delete temporary files", isOn: $model.uninstallTemp)
                 }
                 .font(.caption2)
                 .foregroundStyle(Color.slateTextDim)
                 .toggleStyle(.checkbox)
-                .padding(10)
-                .liquidGlassBackground(cornerRadius: 8, customBorderColor: Color.white.opacity(0.1))
-                
+                .padding(.top, 10)
+
                 Button(role: .destructive) {
                     let alert = NSAlert()
                     alert.messageText = "Clean Uninstall andross?"

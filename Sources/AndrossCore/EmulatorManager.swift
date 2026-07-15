@@ -361,10 +361,26 @@ public final class EmulatorManager: Sendable {
         return serials.count
     }
 
-    /// Delete a virtual device and its data.
+    /// Move a virtual device to the Trash — recoverable, unlike `avdmanager
+    /// delete avd`, which erases the `.avd` in place with no way back (it cost
+    /// a phone once). The caller shuts the phone down first; a running AVD holds
+    /// its files open. Returns false if any piece couldn't be trashed.
     @discardableResult
-    public func deleteAVD(name: String) -> Shell.Result {
-        Shell.run([cmdlineTool("avdmanager"), "delete", "avd", "-n", name])
+    public func deleteAVD(name: String) -> Bool {
+        let avdHome = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".android")
+            .appendingPathComponent("avd")
+        let pieces = [avdHome.appendingPathComponent("\(name).avd"),
+                      avdHome.appendingPathComponent("\(name).ini")]
+        var ok = true
+        for url in pieces where FileManager.default.fileExists(atPath: url.path) {
+            do {
+                try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+            } catch {
+                ok = false
+            }
+        }
+        return ok
     }
 
     /// Install a local APK file to the given emulator.

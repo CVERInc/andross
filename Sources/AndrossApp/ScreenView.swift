@@ -237,7 +237,7 @@ struct ScreenAppView: View {
                 // height — and the streaming hint it carried ("click to type")
                 // is answered by the phone itself the moment you click it.
                 if !isStreaming {
-                    Text("Beta · Click screen to type · Streams over adb")
+                    Text("Click the screen to type")
                         .font(.system(size: 8))
                         .foregroundStyle(Color.slateTextDim.opacity(0.7))
                         .padding(.top, 4)
