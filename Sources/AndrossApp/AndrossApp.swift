@@ -367,7 +367,7 @@ final class AppModel: ObservableObject {
     func createIdentity(name: String) {
         guard !name.isEmpty else { return }
         guard let serial = activeSerial else {
-            log("No running phone — launch a virtual device first.")
+            log("No phone is running — start one first.")
             return
         }
         log("Creating new identity sandbox [\(name)]...")
@@ -527,7 +527,7 @@ final class AppModel: ObservableObject {
                     ? "Boot started — the phone will live in the Screen view."
                     : "Boot started — your apps will appear once the phone is up.")
             } else {
-                log("Boot failed: the engine isn't installed yet — create a device first.")
+                log("Boot failed: the engine isn't installed yet — create a phone first.")
             }
         } else {
             // Nothing to boot yet — guide to device creation.
@@ -599,7 +599,7 @@ final class AppModel: ObservableObject {
 
     func installAPK(at url: URL) {
         guard let serial = activeSerial else {
-            log("No running phone — launch a virtual device before installing.")
+            log("No phone is running — start one before installing.")
             return
         }
         let apkSize = EmulatorManager.shared.getFileSize(path: url.path)
@@ -766,7 +766,7 @@ final class AppModel: ObservableObject {
     
     func createNewPhone() {
         guard !newName.isEmpty else { return }
-        progressMessage = "Creating virtual device [\(newName)]..."
+        progressMessage = "Creating phone [\(newName)]…"
         isCreating = true
         
         let name = newName
@@ -1610,7 +1610,7 @@ struct ContentView: View {
                                          showLabel: dockHovering) {
                                     model.togglePower()
                                 }
-                                dockIcon(title: "Devices", icon: "iphone", showLabel: dockHovering) {
+                                dockIcon(title: "Phones", icon: "iphone", showLabel: dockHovering) {
                                     withAnimation(.easeIn(duration: 0.15)) { model.activeApp = .devices }
                                 }
                                 dockIcon(title: "Sandboxes", icon: "person.2", showLabel: dockHovering) {
@@ -1786,7 +1786,7 @@ struct ContentView: View {
     
     private func activeAppTitle(_ app: AppModel.ActiveApp) -> String {
         switch app {
-        case .devices: return "Devices"
+        case .devices: return "Phones"
         case .sandboxes: return "Sandboxes"
         case .settings: return "Settings"
         case .screen: return model.activeDeviceName.isEmpty ? "Screen" : model.activeDeviceName
@@ -1887,7 +1887,7 @@ struct DevicesAppView: View {
     var body: some View {
         VStack(spacing: 16) {
             HStack {
-                Text("Your Virtual Phones")
+                Text("Phones")
                     .font(.subheadline).bold()
                 Spacer()
                 Button {
@@ -1902,7 +1902,7 @@ struct DevicesAppView: View {
             
             if model.avds.isEmpty {
                 VStack(spacing: 8) {
-                    Text("No virtual phones yet.")
+                    Text("No phones yet.")
                         .font(.caption)
                         .foregroundStyle(Color.slateTextDim)
                     Text("Click Add to create your first one — andross fetches everything it needs.")
@@ -1931,7 +1931,7 @@ struct DevicesAppView: View {
                             // Launch button
                             Button {
                                 model.selectedAVD = name
-                                model.log("Booting virtual device [\(name)]...")
+                                model.log("Starting [\(name)]…")
                                 let ok = EmulatorManager.shared.startAVD(name: name, headless: model.headlessBoot)
                                 if ok {
                                     model.log(model.headlessBoot
@@ -1943,7 +1943,7 @@ struct DevicesAppView: View {
                                         model.refreshIdentities()
                                     }
                                 } else {
-                                    model.log("Boot failed: emulator engine not installed yet (create a device first to download it).")
+                                    model.log("Boot failed: engine not installed yet (create a phone first to download it).")
                                 }
                             } label: {
                                 Text("Launch")
@@ -1992,7 +1992,7 @@ struct SandboxesAppView: View {
             }
             
             if model.identities.isEmpty {
-                Text("Identities live inside a running phone.\nLaunch one from Devices first.")
+                Text("Identities live inside a running phone.\nLaunch one from Phones first.")
                     .font(.caption)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(Color.slateTextDim)

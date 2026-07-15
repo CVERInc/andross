@@ -49,8 +49,8 @@ public enum AppCatalog {
     /// Falls back to the raw API level when the mapping is unknown.
     public static func androidVersionName(apiLevel: Int) -> String {
         if let release = androidReleaseNames[apiLevel] {
-            return "Android \(release)  (API \(apiLevel))"
+            return "Android \(release)"
         }
-        return "API \(apiLevel)"
+        return "Android (API \(apiLevel))"
     }
 }
