@@ -36,9 +36,6 @@ struct WindowDragArea: NSViewRepresentable {
 /// moves the window — the notch is the natural grab handle.
 struct Island<Trailing: View>: View {
     @ObservedObject var model = AppModel.shared
-    /// Radius of the bar's upper corners — set to the host screen's own corner
-    /// so the expanded bar looks cut from it, not stuck on.
-    var topCornerRadius: CGFloat = 45
     /// Home wears the bar the whole time; only the phone screen hides into a
     /// notch, because only the phone screen has content to keep clear of the
     /// status-bar corners. When always-open the wordmark is simply always home.
@@ -71,17 +68,22 @@ struct Island<Trailing: View>: View {
         }
     }
 
-    /// The resting notch: a small black capsule, a hair below the top edge.
+    /// The resting notch: a small black capsule floating just below the top
+    /// edge, Dynamic-Island style. This owns its whole vertical offset — the
+    /// host places the island flush so the expanded bar can reach the top, and
+    /// the notch pads itself down from there.
     private var idleNotch: some View {
         Color.clear
             .frame(width: idleWidth, height: idleHeight)
             .background(WindowDragArea())
             .background(Capsule().fill(Color.black).allowsHitTesting(false))
-            .padding(.top, 8)
+            .padding(.top, 9)
     }
 
-    /// The expanded status bar: full width, flush to the top, upper corners
-    /// rounded to the screen's radius and the lower ones just softened.
+    /// The expanded status bar: full width, flush to the top, square corners.
+    /// It doesn't round itself — the window's own 55pt corner mask clips it, the
+    /// same mask that rounds the streamed screen's bottom, so the bar's top
+    /// corners match the window exactly with nothing to keep in sync by hand.
     private var expandedBar: some View {
         HStack(spacing: 0) {
             lights
@@ -105,17 +107,7 @@ struct Island<Trailing: View>: View {
         // to the drag area behind it; a filled SwiftUI shape otherwise swallows
         // the event before AppKit's move-by-background sees it.
         .background(WindowDragArea())
-        .background(
-            UnevenRoundedRectangle(
-                topLeadingRadius: topCornerRadius,
-                bottomLeadingRadius: 14,
-                bottomTrailingRadius: 14,
-                topTrailingRadius: topCornerRadius,
-                style: .continuous
-            )
-            .fill(Color.black)
-            .allowsHitTesting(false)
-        )
+        .background(Rectangle().fill(Color.black).allowsHitTesting(false))
         .transition(.opacity)
     }
 

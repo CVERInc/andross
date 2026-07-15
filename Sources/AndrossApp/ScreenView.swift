@@ -205,13 +205,11 @@ struct ScreenAppView: View {
             .padding(embeddedScreenBezel)
 
             if model.activeSerial != nil && (isStreaming || posterImage != nil) {
+                // Flush to the top and full width: the expanded bar reaches the
+                // window's edges so its corner mask clips it, and the idle notch
+                // floats itself down from here. No inset, or the square bar would
+                // strand a gap above the window's rounded corners.
                 island
-                    // Rides the status bar, one bezel plus a hair down, where
-                    // Android draws nothing. The horizontal inset is what the
-                    // expanded bar spreads within, so its lights land just inside
-                    // the screen's top-left corner rather than on the very edge.
-                    .padding(.top, embeddedScreenBezel + 6)
-                    .padding(.horizontal, embeddedScreenBezel + 4)
             }
         }
         .task(id: model.activeSerial) {

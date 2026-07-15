@@ -827,7 +827,7 @@ private struct ChipBarView: View {
     @ObservedObject var model = AppModel.shared
 
     var body: some View {
-        Island(topCornerRadius: 52, alwaysExpanded: true) {
+        Island(alwaysExpanded: true) {
             if model.activeSerial != nil {
                 HStack(spacing: 8) {
                     Button {
