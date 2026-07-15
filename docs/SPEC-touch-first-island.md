@@ -1,8 +1,13 @@
-# Touch-first island — locked spec
+# Touch-first island — spec
 
-> Locked with the maintainer on 2026-07-15. The island's morph IS the mode
-> switch. Do not add chrome (no toggle button, no border tell, no second bar,
-> no pushing the phone down). Supersedes the touch-mode toggle from 0dd0f4c.
+> Locked and **shipped** 2026-07-15 (commit 2254b88); hand-verified by the
+> maintainer — dwell-to-bloom and touch-everywhere both feel right. The
+> island's morph IS the mode switch. Do not add chrome (no toggle button, no
+> border tell, no second bar, no pushing the phone down). Supersedes the
+> touch-mode toggle from 0dd0f4c.
+>
+> If you revisit: the ~150ms dwell (`ChipHostView.dwellDelay`) is the one feel
+> knob; it landed right on the first try, so change it only on a real complaint.
 
 ## The one idea
 
