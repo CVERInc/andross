@@ -161,12 +161,8 @@ final class AppModel: ObservableObject {
     
     @Published var activeApp: ActiveApp? = nil
 
-    /// iPhone Mirroring-style chrome: the top strip (traffic lights + window
-    /// controls) stays invisible until the pointer enters it.
-    @Published var chromeHovering = false
-    /// The size/rotation picker anchored to the green light. Lives on the
-    /// model because the green light (chip strip) and the menu (phone body)
-    /// render in different hosting views.
+    /// The size/rotation picker anchored to the green light. Lives on the model
+    /// because the green light and the menu render in different hosting views.
     @Published var sizeMenuVisible = false
 
     // Default to Phone Portrait on launch
@@ -806,62 +802,16 @@ struct WindowConfigurator: NSViewRepresentable {
     }
 }
 
-/// The window's entire visible surface (borderless: this view fills the
-/// whole window, edge to edge — there is no separate system-drawn chrome to
-/// leak from behind it). Owns the top-strip hover zone: moving the pointer
-/// into the header row (+8pt slop below it) fades in the hand-drawn
-/// traffic lights and window controls, rendered by ChipBarView as an
-/// overlay on top of the regular SwiftUI content — matching the old
-/// borderless app's behavior, just with a hover gate instead of always-on
-/// dots.
+/// The window's entire visible surface (borderless: this view fills the whole
+/// window, edge to edge — there is no separate system-drawn chrome to leak from
+/// behind it). It hosts the notch (`ChipBarView`) in a strip across the top; the
+/// notch owns its own hover now, so this view no longer tracks the pointer — it
+/// used to fade a hover strip in and out, back when the controls were bare dots
+/// on the glass instead of a self-contained pill.
 private class CustomGlassView: NSVisualEffectView {
-    /// Matches ContentView's own header row exactly (top:32 + ~20pt title
-    /// text + bottom:12, ending right at the divider) so the chip bar's
-    /// hover zone — and the dots inside it — line up with the title
-    /// instead of floating in their own disconnected band above it.
+    /// Height of the top strip the notch host is pinned to — tall enough for the
+    /// idle pill and the expanded bar it grows into.
     static let stripHeight: CGFloat = 64
-    /// Extend the hover zone a little below the strip so the chrome doesn't
-    /// flicker off the instant the pointer dips toward the buttons.
-    private static let hoverSlop: CGFloat = 8
-    private var hideWorkItem: DispatchWorkItem?
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
-        let strip = NSRect(x: 0,
-                           y: bounds.height - Self.stripHeight - Self.hoverSlop,
-                           width: bounds.width,
-                           height: Self.stripHeight + Self.hoverSlop)
-        addTrackingArea(NSTrackingArea(rect: strip,
-                                       options: [.mouseEnteredAndExited, .activeAlways],
-                                       owner: self, userInfo: nil))
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        hideWorkItem?.cancel()
-        hideWorkItem = nil
-        setChrome(visible: true)
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        // Small grace period, matching the size menu's own hide delay, so a
-        // pointer briefly leaving the strip doesn't yank the chrome away.
-        let work = DispatchWorkItem { [weak self] in
-            self?.setChrome(visible: false)
-        }
-        hideWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
-    }
-
-    /// Chrome here is entirely SwiftUI (ChipBarView) — there are no AppKit
-    /// buttons to animate separately, unlike the earlier .titled attempt.
-    func setChrome(visible: Bool) {
-        Task { @MainActor in
-            withAnimation(.easeOut(duration: 0.15)) {
-                AppModel.shared.chromeHovering = visible
-            }
-        }
-    }
 }
 
 /// The hover chip: hand-drawn traffic lights (borderless windows have no
@@ -869,119 +819,52 @@ private class CustomGlassView: NSVisualEffectView {
 /// controls on the right, rendered directly on the glass, visible only
 /// while `chromeHovering`. No pill backdrop: the dots sit straight on the
 /// glass, matching the old always-on borderless look, just hover-gated.
+/// The home screen's notch — the shared `Island` with the home controls on the
+/// right (the screen toggle and pop-out, only while a phone is running). Idle it
+/// stands in for the old "andross" wordmark; the phone screen wears the very
+/// same pill, so the two screens read as one app.
 private struct ChipBarView: View {
     @ObservedObject var model = AppModel.shared
-    let window: NSWindow?
 
     var body: some View {
-        ZStack {
-            HStack(spacing: 9) {
-                // Red/yellow are hand-drawn with explicit actions — real
-                // standardWindowButton(_:for:) widgets were tried and
-                // rejected (see configureWindow): outside their titlebar
-                // slot they render as plain black dots and don't respond
-                // to clicks. Action reaches this exact window directly
-                // (captured at chip-host construction), never
-                // NSApp.keyWindow — that ambiguity is what broke the old
-                // yellow light.
-                Button { NSApp.terminate(nil) } label: {
-                    Circle().fill(Color.slateRed).frame(width: 14, height: 14)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Close")
-                .help("Close (quits andross)")
-
-                Button { window?.miniaturize(nil) } label: {
-                    Circle().fill(Color(hex: 0xFFBD2E)).frame(width: 14, height: 14)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Minimize")
-                .help("Minimize")
-
-                // Green: click toggles the size/rotation picker — the
-                // reason this app keeps a green light at all (see hub
-                // discussion: iPhone Mirroring drops it, andross needs it
-                // for phone/tablet + portrait/landscape switching). Click,
-                // not hover: a 14pt target is too small to reliably land on
-                // mid-fade-in, and cubeconjure's LangPicker already proved
-                // the fix — a plain button toggling a real .popover, not a
-                // hover-driven reveal (SwiftUI's Menu has the same tiny-
-                // hit-area problem the button there was written to avoid).
-                Button {
-                    model.sizeMenuVisible.toggle()
-                } label: {
-                    Circle().fill(Color.androidGreen).frame(width: 14, height: 14)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Window size")
-                .help("Window size & rotation")
-                .popover(isPresented: $model.sizeMenuVisible, arrowEdge: .top) {
-                    sizeMenuContent
-                }
-
-                Spacer()
-
-                if model.activeSerial != nil {
-                    // Screen View toggle — the "multitask" position.
+        Island(topCornerRadius: 52, alwaysExpanded: true) {
+            if model.activeSerial != nil {
+                HStack(spacing: 8) {
                     Button {
                         withAnimation(.easeOut(duration: 0.15)) {
-                            if model.activeApp == .screen {
-                                model.activeApp = nil
-                            } else {
-                                model.openScreen()
-                            }
+                            if model.activeApp == .screen { model.activeApp = nil }
+                            else { model.openScreen() }
                         }
                     } label: {
                         Image(systemName: model.activeApp == .screen ? "iphone.slash" : "play.display")
                             .font(.system(size: 10, weight: .bold))
                             .foregroundStyle(model.activeApp == .screen ? Color.androidGreen : Color.white.opacity(0.85))
-                            .frame(width: 22, height: 22)
-                            .background(Color.white.opacity(0.08))
-                            .clipShape(Circle())
-                            .overlay(Circle().stroke(Color.white.opacity(0.12), lineWidth: 1))
+                            .frame(width: 20, height: 20)
                     }
                     .buttonStyle(.plain)
                     .help(model.activeApp == .screen ? "Close Screen View" : "Open Screen View")
 
-                    // Detach/Eject — the "home" position.
-                    Button {
-                        model.toggleHeadedHeadless()
-                    } label: {
+                    Button { model.toggleHeadedHeadless() } label: {
                         Image(systemName: model.headlessBoot ? "arrow.up.right.square" : "arrow.down.left.square")
                             .font(.system(size: 10, weight: .bold))
                             .foregroundStyle(Color.white.opacity(0.85))
-                            .frame(width: 22, height: 22)
-                            .background(Color.white.opacity(0.08))
-                            .clipShape(Circle())
-                            .overlay(Circle().stroke(Color.white.opacity(0.12), lineWidth: 1))
+                            .frame(width: 20, height: 20)
                     }
                     .buttonStyle(.plain)
                     .help(model.headlessBoot ? "Pop Out Phone Window" : "Embed Phone Window")
                 }
             }
-            // 20pt, not 9 — the row used to sit tight against the 55pt
-            // corner curve (feedback: "位置很尷尬"). Can't fully clear a
-            // 55pt radius from inside a 32pt-tall strip, but this gives it
-            // real breathing room instead of hugging the corner.
-            .padding(.leading, 20)
-            .padding(.trailing, 10)
-            // Same top offset as ContentView's header title (.padding(.top,
-            // 32) there too) — the dots were floating in their own band,
-            // vertically disconnected from "andross" below them. Matching
-            // the offset puts both on the same visual row, the way a real
-            // titlebar keeps lights and title on one baseline.
-            .padding(.top, 32)
         }
+        .frame(maxWidth: .infinity, alignment: .center)
         .frame(maxHeight: .infinity, alignment: .top)
-        // Silent while the phone's screen is up: the island carries these same
-        // controls there, and this row would otherwise lay white-on-white glyphs
-        // across the phone's status bar and collide with the island itself.
-        .opacity(model.chromeHovering && model.activeApp != .screen ? 1 : 0)
-        .allowsHitTesting(model.chromeHovering)
+        // Flush to the window's top edge so the bar reads as the window's own
+        // chrome gone black, its corners meeting the 52pt glass rounding.
+        // Hidden while the phone's screen is up — ScreenView draws its own island
+        // there, and two notches would fight for the same strip.
+        .opacity(model.activeApp == .screen ? 0 : 1)
+        .allowsHitTesting(model.activeApp != .screen)
         .ignoresSafeArea()
     }
-
-    private var sizeMenuContent: some View { SizeMenu(model: model) }
 }
 
 /// Preset-size list, presented as a popover off the green light — mirrors
@@ -1209,7 +1092,7 @@ class ConfiguratorNSView: NSView {
         // Chip bar (traffic lights + window controls), overlaid on the top
         // strip of the glass — on top of the regular SwiftUI content,
         // exactly where the old hand-drawn dots used to sit.
-        let chipHost = NSHostingView(rootView: ChipBarView(window: window))
+        let chipHost = NSHostingView(rootView: ChipBarView())
         chipHost.sizingOptions = []
         glassView.addSubview(chipHost)
         chipHost.translatesAutoresizingMaskIntoConstraints = false
@@ -1232,9 +1115,6 @@ class ConfiguratorNSView: NSView {
                 }
             }
         }
-
-        // Start with the chrome invisible — traffic lights fade in on hover.
-        glassView.setChrome(visible: false)
     }
 
     deinit {
@@ -1390,42 +1270,27 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 // Desktop Content Area
                 VStack(spacing: 0) {
-                    // Unified Header Bar (Transparent background + thin divider
-                    // line). The embedded screen does without it: the header only
-                    // ever carried the device name, which the hover chrome already
-                    // shows, and its height came straight out of the phone. Every
-                    // point it takes here is a point the screen shrinks by.
+                    // A band of top chrome that leaves room for the notch pill
+                    // (ChipBarView) riding above it. On the home screen it holds
+                    // nothing — the notch is the wordmark now — and a sub-view
+                    // shows its own title. No divider: the notch is the whole of
+                    // the top edge's identity, and a line under it just fenced
+                    // off empty space. The embedded screen skips the band
+                    // entirely; every point here is a point it would shrink by.
                     if model.activeApp != .screen {
                         HStack {
-                            // Left: spacer balancing the fixed traffic-light overlay
-                            Color.clear
-                                .frame(width: 60, height: 12)
-
                             Spacer()
-
-                            // Center: Page Title
                             if let activeApp = model.activeApp {
                                 Text(activeAppTitle(activeApp))
                                     .font(.headline).bold()
                                     .foregroundStyle(Color.white)
-                            } else {
-                                Text("andross")
-                                    .font(.system(.headline, design: .monospaced)).bold()
-                                    .foregroundStyle(Color.androidGreen)
                             }
-
                             Spacer()
-
-                            // Right: Balance spacer to keep title perfectly centered
-                            Color.clear
-                                .frame(width: 60, height: 12)
                         }
                         .padding(.horizontal, 36)
                         .padding(.top, 32)
                         .padding(.bottom, 12)
                         .background(Color.clear)
-
-                        Divider().background(Color.slateBorder)
                     }
 
                     // Main Content Canvas

@@ -107,12 +107,14 @@ struct ScreenAppView: View {
     /// Where the scroll gesture's finger currently rests, or nil when it's lifted.
     @State private var scrollFinger: CGPoint?
     @State private var scrollLift: DispatchWorkItem?
-    @State private var islandExpanded = false
 
-    /// Concentric with the window's own 44pt corner: a screen inset by the
-    /// bezel has to lose exactly the bezel from its radius, or the two curves
-    /// run at different speeds and the phone reads as a sticker on a slab.
-    private static let screenCornerRadius: CGFloat = 44 - embeddedScreenBezel
+    /// Concentric with the window's own corner (the 55pt glass mask in
+    /// configureWindow, not the 44pt content clip that sits further in): a
+    /// screen inset by the bezel has to lose exactly the bezel from that radius,
+    /// or the two curves run at different speeds and the phone reads as a
+    /// squared-off sticker on a very round slab.
+    private static let windowCornerRadius: CGFloat = 55
+    private static let screenCornerRadius: CGFloat = windowCornerRadius - embeddedScreenBezel
 
     /// Falls back to the window's own aspect until scrcpy reports the real one,
     /// which keeps the first frames from being squeezed through a stale shape.
@@ -205,9 +207,11 @@ struct ScreenAppView: View {
             if model.activeSerial != nil && (isStreaming || posterImage != nil) {
                 island
                     // Rides the status bar, one bezel plus a hair down, where
-                    // Android draws nothing: clock to the left of it, signal and
-                    // battery to the right.
+                    // Android draws nothing. The horizontal inset is what the
+                    // expanded bar spreads within, so its lights land just inside
+                    // the screen's top-left corner rather than on the very edge.
                     .padding(.top, embeddedScreenBezel + 6)
+                    .padding(.horizontal, embeddedScreenBezel + 4)
             }
         }
         .task(id: model.activeSerial) {
@@ -257,70 +261,28 @@ struct ScreenAppView: View {
         keyMonitor = nil
     }
 
-    /// The island: every control andross has, in a black pill centred on the
-    /// phone's status bar — an emulator has no camera to make room for, so the
-    /// notch is ours.
-    ///
-    /// Collapsed it shows the two keys the phone needs: Back (a mouse has no
-    /// edge-swipe worth the name) and Exit. Home and Recents are deliberately
-    /// absent — the shell *is* the launcher, so `streamScreen` leaves the screen
-    /// the moment Android's own launcher comes forward, which makes Home just a
-    /// long way round to the ✕; and Recents summons the multitasker, the very
-    /// thing the thin shell exists to keep out of sight. The phone's own home
-    /// bar still swipes up to both.
-    ///
-    /// Reach for it and it expands into the window's controls too — close,
-    /// minimize, size, pop-out. They used to live in a hover strip that, once
-    /// the phone filled the window, drew white glyphs across a white status bar.
-    /// Here they have their own black ground, and there is exactly one place in
-    /// the app where a control can be.
+    /// The phone's notch: the shared `Island` with the phone's own keys on the
+    /// right. Back (a mouse has no edge-swipe worth the name) and Exit; then
+    /// pop-out. Home and Recents are deliberately absent — the shell *is* the
+    /// launcher, so `streamScreen` leaves the screen the moment Android's
+    /// launcher comes forward, which makes Home a long way round to the ✕, and
+    /// Recents summons the multitasker the thin shell exists to hide. The phone's
+    /// own home bar still swipes up to both.
     private var island: some View {
-        HStack(spacing: islandExpanded ? 8 : 4) {
-            if islandExpanded {
-                Button { NSApp.terminate(nil) } label: {
-                    Circle().fill(Color.slateRed).frame(width: 11, height: 11)
+        Island {
+            HStack(spacing: 8) {
+                navKey(icon: "chevron.backward", key: .back, label: "Back")
+
+                Button {
+                    withAnimation(.easeOut(duration: 0.15)) { model.activeApp = nil }
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Color.slateRed)
+                        .frame(width: 20, height: 20)
                 }
-                .buttonStyle(.plain)
-                .help("Close (quits andross)")
-                .accessibilityLabel("Close")
+                .buttonStyle(.plain).help("Exit Screen").accessibilityLabel("Exit Screen")
 
-                Button { model.mainWindow?.miniaturize(nil) } label: {
-                    Circle().fill(Color(hex: 0xFFBD2E)).frame(width: 11, height: 11)
-                }
-                .buttonStyle(.plain)
-                .help("Minimize")
-                .accessibilityLabel("Minimize")
-
-                Button { model.sizeMenuVisible.toggle() } label: {
-                    Circle().fill(Color.androidGreen).frame(width: 11, height: 11)
-                }
-                .buttonStyle(.plain)
-                .help("Window size & rotation")
-                .accessibilityLabel("Window size")
-                .popover(isPresented: $model.sizeMenuVisible, arrowEdge: .bottom) {
-                    SizeMenu(model: model)
-                }
-
-                Divider().frame(height: 12).overlay(Color.white.opacity(0.2))
-            }
-
-            navKey(icon: "chevron.backward", key: .back, label: "Back")
-
-            Button {
-                withAnimation(.easeOut(duration: 0.15)) {
-                    model.activeApp = nil
-                }
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(Color.slateRed)
-                    .frame(width: 20, height: 20)
-            }
-            .buttonStyle(.plain)
-            .help("Exit Screen")
-            .accessibilityLabel("Exit Screen")
-
-            if islandExpanded {
                 Button { model.toggleHeadedHeadless() } label: {
                     Image(systemName: model.headlessBoot ? "arrow.up.right.square" : "arrow.down.left.square")
                         .font(.system(size: 10, weight: .bold))
@@ -330,17 +292,6 @@ struct ScreenAppView: View {
                 .buttonStyle(.plain)
                 .help(model.headlessBoot ? "Pop Out Phone Window" : "Embed Phone Window")
                 .accessibilityLabel(model.headlessBoot ? "Pop Out Phone Window" : "Embed Phone Window")
-            }
-        }
-        .padding(.horizontal, islandExpanded ? 12 : 8)
-        .padding(.vertical, 5)
-        // Black, not material: the island has to read as cut out of the phone's
-        // own body the way the hardware one does. Material tints with whatever
-        // the app draws behind it and gives the illusion away.
-        .background(Capsule().fill(Color.black))
-        .onHover { hovering in
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
-                islandExpanded = hovering
             }
         }
     }
