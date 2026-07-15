@@ -178,12 +178,13 @@ final class AppModel: ObservableObject {
     }
 
     /// Boot phones without a separate emulator window; the phone lives in
-    /// the embedded Screen view instead (beta).
-    @Published var headlessBoot = UserDefaults.standard.bool(forKey: "headlessBoot") {
+    /// the embedded Screen view instead. On by default — the phone belongs
+    /// inside andross; the separate window is the opt-out.
+    @Published var headlessBoot = (UserDefaults.standard.object(forKey: "headlessBoot") as? Bool) ?? true {
         didSet { UserDefaults.standard.set(headlessBoot, forKey: "headlessBoot") }
     }
-    
-    @Published var rememberWindowPosition = UserDefaults.standard.bool(forKey: "rememberWindowPosition") {
+
+    @Published var rememberWindowPosition = (UserDefaults.standard.object(forKey: "rememberWindowPosition") as? Bool) ?? true {
         didSet { UserDefaults.standard.set(rememberWindowPosition, forKey: "rememberWindowPosition") }
     }
     
