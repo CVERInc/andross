@@ -133,6 +133,37 @@ expect(AndrossParse.bootCompleted(from: "1\n"), "bootCompleted true for 1")
 expect(!AndrossParse.bootCompleted(from: ""), "bootCompleted false for empty")
 expect(!AndrossParse.bootCompleted(from: "0\n"), "bootCompleted false for 0")
 
+// MARK: emulator failure reason
+
+expectEqual(
+    AndrossParse.emulatorFailureReason(from: """
+    INFO         | Checking: hasSufficientDiskSpace
+    INFO         |      Error: Your device does not have enough disk space to run avd: `mixflavor`
+    FATAL        | Your device does not have enough disk space to run avd: `mixflavor`.
+    """),
+    "Your device does not have enough disk space to run avd: mixflavor.",
+    "FATAL line wins and its LEVEL|/backtick decoration is stripped")
+
+expectEqual(
+    AndrossParse.emulatorFailureReason(from: "PANIC: Cannot find AVD system path for AVD 'foo'\n"),
+    "Cannot find AVD system path for AVD 'foo'",
+    "PANIC line (no pipe) has its label stripped")
+
+expectEqual(
+    AndrossParse.emulatorFailureReason(from: """
+    INFO         | Android emulator version 36.6.11.0
+    ERROR        | Unknown AVD name [foo], use -list-avds to see valid list.
+    ERROR        | HOME is defined but there is no file foo.ini in $HOME/.android/avd
+    ERROR        | (Note: Directories are searched in the order ...)
+    """),
+    "Unknown AVD name [foo], use -list-avds to see valid list.",
+    "first ERROR line (the root cause) wins over the trailing note lines")
+
+expectEqual(
+    AndrossParse.emulatorFailureReason(from: "INFO | booting\nINFO | all good\n"),
+    "The phone's engine stopped right after starting.",
+    "no error/fatal/panic line falls back to the generic reason")
+
 // MARK: LogBuffer (transient coalescing + cap)
 
 var lb = LogBuffer(limit: 3)

@@ -577,18 +577,77 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Open the embedded screen — but never onto Android's own launcher;
-    /// the thin shell IS the launcher. If nothing is open, say so instead.
+    /// Open the embedded screen for the running phone. Per the "show me my
+    /// phone" choice, this mirrors whatever is on the phone — including
+    /// Android's own home screen — rather than refusing when no app is in the
+    /// foreground. (The thin-shell-as-launcher idea returns once there are apps
+    /// to launch into; an empty phone has nothing to shell over.)
     func openScreen() {
-        guard let serial = activeSerial else { return }
+        guard activeSerial != nil else { return }
+        withAnimation(.easeIn(duration: 0.15)) { activeApp = .screen }
+    }
+
+    /// Boot a phone and see it through: disk preflight, then start, then either
+    /// slide into its screen once it's up or surface why it never made it —
+    /// so a launch never dead-ends silently on a "Running" badge that isn't.
+    func launchPhone(_ name: String) {
+        selectedAVD = name
+        let shown = displayName(for: name)
+
+        // The emulator FATALs on boot below ~2 GB free. Catch it here with a
+        // readable number instead of a silent, windowless non-start.
+        let free = EmulatorManager.shared.availableDiskBytes()
+        if free < EmulatorManager.minBootFreeBytes {
+            presentDiskShortage(free: free)
+            return
+        }
+
+        log("Starting [\(shown)]…")
+        guard let observation = EmulatorManager.shared.startAVDObserved(name: name, headless: headlessBoot) else {
+            presentLaunchFailure(name: shown,
+                                 reason: "The Android engine isn't installed yet — create a phone to download it.")
+            return
+        }
+        log(headlessBoot
+            ? "Boot started — the phone will appear here once it's up."
+            : "Boot started — the phone window will appear shortly.")
+
         Task.detached(priority: .userInitiated) {
-            let launcher = EmulatorManager.shared.defaultLauncherPackage(serial: serial)
-            let foreground = EmulatorManager.shared.foregroundPackage(serial: serial)
+            let outcome = EmulatorManager.shared.awaitLaunchOutcome(observation)
             await MainActor.run {
-                if let launcher, foreground == launcher {
-                    self.log("Nothing is open on the phone — tap an app to start one.")
+                self.refreshIdentities()
+                switch outcome {
+                case .booted(let serial):
+                    self.activeSerial = serial
+                    self.log("[\(shown)] is up.")
+                    if self.headlessBoot { self.openScreen() }
+                case .failed(let reason):
+                    self.log("Couldn't start [\(shown)] — \(reason)")
+                    self.presentLaunchFailure(name: shown, reason: reason)
+                case .timedOut:
+                    self.log("[\(shown)] didn't finish starting in time.")
+                    self.presentLaunchFailure(name: shown,
+                                              reason: "The phone didn't finish starting in time. Check System → Activity, then try again.")
+                }
+            }
+        }
+    }
+
+    /// Jump back into an already-running phone: resolve its serial (it may not
+    /// be the currently-active one) and open its screen.
+    func showRunningPhone(_ name: String) {
+        selectedAVD = name
+        Task.detached(priority: .userInitiated) {
+            let match = EmulatorManager.shared.runningAVDs().first { $0.avdName == name }
+            await MainActor.run {
+                if let match {
+                    self.activeSerial = match.serial
+                    self.refreshIdentities()
+                    self.openScreen()
+                } else if self.activeSerial != nil {
+                    self.openScreen()
                 } else {
-                    withAnimation(.easeIn(duration: 0.15)) { self.activeApp = .screen }
+                    self.log("[\(self.displayName(for: name))] isn't reachable right now.")
                 }
             }
         }
@@ -607,14 +666,7 @@ final class AppModel: ObservableObject {
                 }
             }
         } else if let name = selectedAVD ?? avds.first {
-            log("Booting \(name)…")
-            if EmulatorManager.shared.startAVD(name: name, headless: headlessBoot) {
-                log(headlessBoot
-                    ? "Boot started — the phone will live in the Screen view."
-                    : "Boot started — your apps will appear once the phone is up.")
-            } else {
-                log("Boot failed: the engine isn't installed yet — create a phone first.")
-            }
+            launchPhone(name)
         } else {
             // Nothing to boot yet — guide to device creation.
             activeApp = .devices
@@ -907,6 +959,28 @@ final class AppModel: ObservableObject {
         let alert = NSAlert()
         alert.messageText = "Couldn't create \(displayName)"
         alert.informativeText = logs.last ?? "The phone couldn't be created. See System → Activity for details."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    /// A launch attempt failed or timed out — say why, instead of leaving a
+    /// phone that reads "Running" but never shows.
+    private func presentLaunchFailure(name: String, reason: String) {
+        let alert = NSAlert()
+        alert.messageText = "Couldn't start \(name)"
+        alert.informativeText = reason
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    /// Refuse a boot we know the emulator would reject for space, with the real
+    /// number and where to look — rather than letting it FATAL windowlessly.
+    private func presentDiskShortage(free: Int64) {
+        let alert = NSAlert()
+        alert.messageText = "Not enough free space to start the phone"
+        alert.informativeText = "Starting a phone needs about 2 GB free, but this Mac has \(humanBytes(free)) left. Free some space — Storage shows what andross is using — then try again."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "OK")
         alert.runModal()
@@ -2070,30 +2144,27 @@ struct DevicesAppView: View {
                         Spacer()
 
                         if isRunning {
-                            Text("Running")
-                                .font(.caption2).bold()
+                            // The pill is the way back into a running phone —
+                            // tap it to open the screen instead of hunting for
+                            // the toolbar button.
+                            Button {
+                                model.showRunningPhone(name)
+                            } label: {
+                                HStack(spacing: 3) {
+                                    Text("Running").font(.caption2).bold()
+                                    Image(systemName: "chevron.right").font(.system(size: 8, weight: .bold))
+                                }
                                 .padding(.horizontal, 6).padding(.vertical, 2)
                                 .background(Color.androidGreen.opacity(0.2))
                                 .foregroundStyle(Color.androidGreen)
                                 .clipShape(RoundedRectangle(cornerRadius: 4))
+                            }
+                            .buttonStyle(.plain)
+                            .help("Show this phone's screen")
                         } else {
                             // Launch button
                             Button {
-                                model.selectedAVD = name
-                                model.log("Starting [\(model.displayName(for: name))]…")
-                                let ok = EmulatorManager.shared.startAVD(name: name, headless: model.headlessBoot)
-                                if ok {
-                                    model.log(model.headlessBoot
-                                        ? "Boot started — the phone will live in the Screen view."
-                                        : "Boot started — the phone window will appear shortly.")
-                                    Task {
-                                        // Pick up the new device once it registers with adb.
-                                        try? await Task.sleep(nanoseconds: 8_000_000_000)
-                                        model.refreshIdentities()
-                                    }
-                                } else {
-                                    model.log("Boot failed: engine not installed yet (create a phone first to download it).")
-                                }
+                                model.launchPhone(name)
                             } label: {
                                 Text("Launch")
                                     .font(.caption).bold()

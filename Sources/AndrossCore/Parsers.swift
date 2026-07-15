@@ -187,4 +187,44 @@ public enum AndrossParse {
         // fits an Int with no overflow risk on any supported platform.
         return ScreencapHeader(width: width, height: height, pixelByteCount: width * height * 4)
     }
+
+    /// Distil an emulator's stderr into a one-line, human-readable failure
+    /// reason. The emulator decorates each log line with a severity and a pipe —
+    /// `FATAL        | Your device does not have enough disk space to run avd: X`
+    /// — or aborts with `PANIC: Cannot find AVD system path`. We surface the most
+    /// telling line, stripped of that decoration, so a person sees the cause
+    /// without reading the whole log. Returns a generic fallback when nothing in
+    /// the text stands out as the reason.
+    public static func emulatorFailureReason(from stderr: String) -> String {
+        let lines = stderr.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        // Severity order: an explicit PANIC/FATAL beats a generic error line.
+        // Within a severity, take the *first* match — the emulator prints the
+        // root cause first and follows it with notes/context that read as noise.
+        for needle in ["PANIC:", "FATAL", "ERROR", "Error:"] {
+            if let hit = lines.first(where: { $0.range(of: needle) != nil }) {
+                return cleanEmulatorLine(hit)
+            }
+        }
+        return "The phone's engine stopped right after starting."
+    }
+
+    /// Strip the `LEVEL | ` decoration and severity label off one emulator log
+    /// line, leaving just the human-meaningful message.
+    private static func cleanEmulatorLine(_ raw: String) -> String {
+        var line = raw
+        // Drop the leading `LEVEL   | ` the emulator prepends to each log line.
+        if let pipe = line.range(of: "| ") {
+            line = String(line[pipe.upperBound...])
+        }
+        // Drop a leading severity label if that's what matched (PANIC lines
+        // carry no pipe, so the label survives the step above).
+        for label in ["PANIC:", "FATAL:", "ERROR:", "Error:"] where line.hasPrefix(label) {
+            line = String(line.dropFirst(label.count))
+        }
+        line = line.trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: "`", with: "")
+        return line.isEmpty ? raw : line
+    }
 }

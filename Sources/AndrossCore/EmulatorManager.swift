@@ -343,7 +343,17 @@ public final class EmulatorManager: Sendable {
     /// `waitForBootedEmulator()` for that.
     @discardableResult
     public func startAVD(name: String, headless: Bool = false) -> Bool {
-        guard emulatorInstalled else { return false }
+        startAVDObserved(name: name, headless: headless) != nil
+    }
+
+    /// Start an AVD and hand back a handle that watches how the launch turns
+    /// out. Unlike `startAVD`, which only reports whether the process *spawned*,
+    /// the returned observation captures the emulator's stderr and its early
+    /// exit — so a launch that dies a second later (e.g. "not enough disk
+    /// space") can be surfaced instead of vanishing. Returns nil only when the
+    /// engine is missing or the process fails to even start.
+    public func startAVDObserved(name: String, headless: Bool = false) -> LaunchObservation? {
+        guard emulatorInstalled else { return nil }
 
         var args = ["-avd", name, "-gpu", "host", "-memory", "2048", "-dns-server", "8.8.8.8"]
         if headless {
@@ -356,13 +366,31 @@ public final class EmulatorManager: Sendable {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: emulatorPath)
         process.arguments = args
+
+        // Capture stderr (bounded) so a fatal reason is readable; a booted
+        // emulator is long-lived and chatty, so the observation caps what it
+        // keeps rather than buffering the whole session.
+        let errPipe = Pipe()
         process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+        process.standardError = errPipe
+        let observation = LaunchObservation()
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil   // EOF
+            } else {
+                observation.appendStderr(data)
+            }
+        }
+        process.terminationHandler = { proc in
+            observation.markExited(proc.terminationStatus)
+            errPipe.fileHandleForReading.readabilityHandler = nil
+        }
 
         do {
             try process.run()
         } catch {
-            return false
+            return nil
         }
         registerSpawned(process)
 
@@ -377,7 +405,32 @@ public final class EmulatorManager: Sendable {
                 }
             }
         }
-        return true
+        return observation
+    }
+
+    /// Race a freshly-launched emulator to one of three ends: it registers with
+    /// adb and finishes booting (`.booted`), its process dies before any device
+    /// appears (`.failed`, with the reason distilled from stderr), or neither
+    /// happens in time (`.timedOut`). This is the observation `startAVDObserved`
+    /// enables — call it off the main thread; it blocks.
+    public func awaitLaunchOutcome(_ observation: LaunchObservation,
+                                   timeoutSeconds: Int = 240) -> LaunchOutcome {
+        let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
+        while Date() < deadline {
+            if let serial = connectedEmulators().first {
+                let remaining = max(Int(deadline.timeIntervalSinceNow), 10)
+                return waitForBoot(serial: serial, timeoutSeconds: remaining)
+                    ? .booted(serial)
+                    : .timedOut
+            }
+            // Died before any device registered — a real launch failure, not a
+            // slow boot. The disk-space FATAL lands here (~1s after spawn).
+            if observation.hasExited {
+                return .failed(AndrossParse.emulatorFailureReason(from: observation.stderrText))
+            }
+            Thread.sleep(forTimeInterval: 1)
+        }
+        return .timedOut
     }
 
     /// Gracefully terminate all running emulator instances.
@@ -483,6 +536,72 @@ public final class EmulatorManager: Sendable {
     public func getFileSize(path: String) -> Int64 {
         let attrs = try? FileManager.default.attributesOfItem(atPath: path)
         return attrs?[.size] as? Int64 ?? 0
+    }
+
+    // MARK: - Free space
+
+    /// Bytes free on the volume that holds the AVDs. Uses statfs-style free size
+    /// (not the optimistic "important usage" figure) so it tracks the same
+    /// number the emulator's own boot-time disk check sees, and returns
+    /// `.max` if the volume can't be probed (never a false "disk full").
+    public func availableDiskBytes() -> Int64 {
+        let path = URL(fileURLWithPath: NSHomeDirectory()).path
+        guard let attrs = try? FileManager.default.attributesOfFileSystem(forPath: path),
+              let free = attrs[.systemFreeSize] as? Int64 else { return .max }
+        return free
+    }
+
+    /// The emulator aborts its own boot below roughly this much free space
+    /// ("not enough disk space to run avd"). We gate a touch below that so a
+    /// boot with real headroom is never blocked, and lean on the launch-failure
+    /// surface to catch the narrow margin above it.
+    public static let minBootFreeBytes: Int64 = 2 * 1024 * 1024 * 1024
+}
+
+/// How a launched emulator turned out. See `awaitLaunchOutcome`.
+public enum LaunchOutcome: Sendable, Equatable {
+    /// Booted and reachable at this adb serial.
+    case booted(String)
+    /// The engine stopped before a device appeared; carries a human reason.
+    case failed(String)
+    /// Neither booted nor failed within the allotted time.
+    case timedOut
+}
+
+/// A live handle onto a launching emulator: its (bounded) stderr and whether
+/// its process has exited. The emulator process writes from a background
+/// thread while the launch-watcher reads from another, so every access is
+/// lock-guarded — hence `@unchecked Sendable`.
+public final class LaunchObservation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _stderr = Data()
+    private var _exited = false
+
+    /// Keep only the tail: a fatal reason is emitted early and briefly, while a
+    /// booted emulator would otherwise stream megabytes over its lifetime.
+    private static let stderrCap = 32 * 1024
+
+    func appendStderr(_ data: Data) {
+        lock.lock(); defer { lock.unlock() }
+        _stderr.append(data)
+        if _stderr.count > Self.stderrCap {
+            _stderr = _stderr.suffix(Self.stderrCap)
+        }
+    }
+
+    func markExited(_ status: Int32) {
+        lock.lock(); defer { lock.unlock() }
+        _exited = true
+    }
+
+    public var hasExited: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _exited
+    }
+
+    public var stderrText: String {
+        lock.lock(); defer { lock.unlock() }
+        return String(data: _stderr, encoding: .utf8) ?? ""
     }
 }
 
