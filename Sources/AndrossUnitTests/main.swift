@@ -427,6 +427,19 @@ expect(plainFrameHeader?.isConfig == false && plainFrameHeader?.isKeyFrame == fa
 expectEqual(AndrossParse.scrcpyFrameHeader(from: frameHeaderBytes(ptsAndFlags: 0, packetSize: UInt32(AndrossParse.maxScrcpyPacketSize) + 1)), nil,
             "scrcpyFrameHeader rejects a packet size past the sanity ceiling")
 
+// MARK: scrcpy audio codec meta (sentinels vs a real codec)
+
+expectEqual(AndrossParse.scrcpyAudioMeta(from: [0, 0, 0, 0]), .disabled,
+            "scrcpyAudioMeta reads codec id 0 as audio disabled by the device")
+expectEqual(AndrossParse.scrcpyAudioMeta(from: [0, 0, 0, 1]), .configError,
+            "scrcpyAudioMeta reads codec id 1 as a capture/config error")
+expectEqual(AndrossParse.scrcpyAudioMeta(from: [0x00, 0x72, 0x61, 0x77]), .codec(id: AndrossParse.scrcpyAudioCodecRaw),
+            "scrcpyAudioMeta reads the raw-PCM fourcc as a real codec")
+expectEqual(AndrossParse.scrcpyAudioCodecRaw, AndrossParse.scrcpyCodecId(from: Array("\u{0}raw".utf8)),
+            "the raw fourcc constant matches 'raw' right-aligned in four bytes")
+expectEqual(AndrossParse.scrcpyAudioMeta(from: [0x6f, 0x70]), nil,
+            "scrcpyAudioMeta nil on a short header")
+
 var deviceNameBuf = [UInt8](repeating: 0, count: 64)
 let nameBytes = Array("line-test".utf8)
 deviceNameBuf.replaceSubrange(0..<nameBytes.count, with: nameBytes)

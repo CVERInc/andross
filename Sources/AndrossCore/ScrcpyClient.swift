@@ -33,6 +33,14 @@ public final class ScrcpyClient: @unchecked Sendable {
         case frame(VideoFrame)
     }
 
+    /// One item from the audio stream. `unavailable` is terminal — the device
+    /// reported it can't capture (see `ScrcpyAudioMeta`), and no PCM follows.
+    /// `pcm` payloads are raw s16le/48 kHz/stereo interleaved samples.
+    public enum AudioEvent: Sendable {
+        case unavailable
+        case pcm(Data)
+    }
+
     /// SHA-256 of the vendored server jar (Third-Party/scrcpy/NOTICE.md),
     /// checked before every push — a corrupted or tampered resource must
     /// degrade to the poster fallback, never run silently.
@@ -48,6 +56,7 @@ public final class ScrcpyClient: @unchecked Sendable {
 
     private var serverProcess: Process?
     private var videoSocketFD: Int32 = -1
+    private var audioSocketFD: Int32 = -1
     private var controlSocketFD: Int32 = -1
     private var forwardedPort: Int?
 
@@ -101,13 +110,21 @@ public final class ScrcpyClient: @unchecked Sendable {
 
         // The server needs a moment to bind its LocalServerSocket after
         // app_process starts; retry the connect briefly rather than racing it.
+        //
+        // With audio enabled the server accepts three sockets in a fixed order —
+        // video, then audio, then control — and assigns them by that order, so
+        // we must connect in exactly that sequence. The audio socket always
+        // connects (it's opened whenever audio is *requested*); whether real
+        // audio follows is read off the socket itself in readAudioLoop.
         guard let videoFD = await connectWithRetry(port: port),
+              let audioFD = await connectWithRetry(port: port),
               let controlFD = await connectWithRetry(port: port) else {
-            Ln.warn("scrcpy: could not connect video/control sockets")
+            Ln.warn("scrcpy: could not connect video/audio/control sockets")
             stop()
             return nil
         }
         videoSocketFD = videoFD
+        audioSocketFD = audioFD
         controlSocketFD = controlFD
 
         // Dummy byte (always sent to the first-accepted socket, which is
@@ -141,6 +158,7 @@ public final class ScrcpyClient: @unchecked Sendable {
     /// adb port forward. Safe to call more than once.
     public func stop() {
         if videoSocketFD >= 0 { Darwin.close(videoSocketFD); videoSocketFD = -1 }
+        if audioSocketFD >= 0 { Darwin.close(audioSocketFD); audioSocketFD = -1 }
         if controlSocketFD >= 0 { Darwin.close(controlSocketFD); controlSocketFD = -1 }
         if let process = serverProcess, process.isRunning {
             process.terminate()
@@ -164,7 +182,12 @@ public final class ScrcpyClient: @unchecked Sendable {
             "scid=\(String(format: "%08x", scid))",
             "tunnel_forward=true",
             "video=true",
-            "audio=false",
+            "audio=true",
+            // Raw PCM (s16le/48k/stereo): no decoder to bundle, and the extra
+            // bandwidth is nothing over a localhost adb tunnel. Audio failure is
+            // non-fatal by default (require_audio stays false), so a device that
+            // can't capture just streams video.
+            "audio_codec=raw",
             "control=true",
             "cleanup=true",
             "video_codec=h264",
@@ -251,6 +274,58 @@ public final class ScrcpyClient: @unchecked Sendable {
 
             continuation.yield(.frame(VideoFrame(isConfig: header.isConfig, isKeyFrame: header.isKeyFrame,
                                                   pts: header.pts, data: payload)))
+        }
+        continuation.finish()
+    }
+
+    // MARK: - Audio read loop
+
+    /// Begin reading the audio socket, if one connected. Returns nil when audio
+    /// was never wired up; otherwise the stream's first event may still be
+    /// `.unavailable` if the device can't capture. Call once, after `start()`.
+    public func makeAudioStream() -> AsyncStream<AudioEvent>? {
+        guard audioSocketFD >= 0 else { return nil }
+        let fd = audioSocketFD
+        return AsyncStream<AudioEvent> { continuation in
+            Task.detached(priority: .userInitiated) { [weak self] in
+                guard let self else { continuation.finish(); return }
+                await self.readAudioLoop(fd: fd, continuation: continuation)
+            }
+        }
+    }
+
+    private func readAudioLoop(fd: Int32, continuation: AsyncStream<AudioEvent>.Continuation) async {
+        // Leading 4-byte codec id — or a sentinel meaning "no audio here".
+        guard let metaBytes = readExactly(fd: fd, count: 4),
+              let meta = AndrossParse.scrcpyAudioMeta(from: [UInt8](metaBytes)) else {
+            continuation.finish(); return
+        }
+        switch meta {
+        case .disabled, .configError:
+            Ln.warn("scrcpy: device reports no audio (\(meta)); streaming video only")
+            continuation.yield(.unavailable)
+            continuation.finish()
+            return
+        case .codec(let id):
+            guard id == AndrossParse.scrcpyAudioCodecRaw else {
+                Ln.warn("scrcpy: unexpected audio codec \(AndrossParse.scrcpyCodecName(from: id)); no audio")
+                continuation.yield(.unavailable)
+                continuation.finish()
+                return
+            }
+        }
+
+        // Same 12-byte frame header as video; raw sends no config packet, but a
+        // config-flagged packet (were one ever to appear) carries no PCM to play.
+        while true {
+            guard let headerData = readExactly(fd: fd, count: 12),
+                  let header = AndrossParse.scrcpyFrameHeader(from: [UInt8](headerData)) else {
+                break
+            }
+            guard header.packetSize > 0 else { continue }
+            guard let payload = readExactly(fd: fd, count: header.packetSize) else { break }
+            if header.isConfig { continue }
+            continuation.yield(.pcm(payload))
         }
         continuation.finish()
     }

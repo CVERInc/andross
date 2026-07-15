@@ -97,6 +97,32 @@ extension AndrossParse {
         return ScrcpyFrameHeader(isConfig: isConfig, isKeyFrame: isKeyFrame, pts: pts, packetSize: packetSize)
     }
 
+    /// The audio stream's leading 4-byte word. Unlike video, this can be a
+    /// sentinel instead of a codec: the server opens the audio socket whenever
+    /// audio was *requested*, then — if the device can't actually capture
+    /// (Android < 11, no playback-capture permission, an emulator without an
+    /// audio device) — reports the failure here instead of a codec id, and
+    /// sends no frames. Both sentinels mean the same thing to us: no audio this
+    /// session, carry on with video.
+    public enum ScrcpyAudioMeta: Equatable, Sendable {
+        case disabled          // 0x00000000 — device declined to send audio
+        case configError       // 0x00000001 — capture/encoder init failed
+        case codec(id: UInt32) // a real codec fourcc (we only ever ask for raw)
+    }
+
+    /// scrcpy's fourcc for raw PCM: "raw" right-aligned in four bytes. Raw is
+    /// s16le, 48 kHz, stereo — no config packet, frames start immediately.
+    public static let scrcpyAudioCodecRaw: UInt32 = 0x00_72_61_77
+
+    public static func scrcpyAudioMeta(from bytes: [UInt8]) -> ScrcpyAudioMeta? {
+        guard let id = scrcpyCodecId(from: bytes) else { return nil }
+        switch id {
+        case 0: return .disabled
+        case 1: return .configError
+        default: return .codec(id: id)
+        }
+    }
+
     /// Parse the fixed 64-byte device-name field sent once at connection
     /// start (`sendDeviceMeta`) — UTF-8, NUL-padded/truncated.
     public static func scrcpyDeviceName(from bytes: [UInt8]) -> String? {

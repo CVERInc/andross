@@ -310,7 +310,10 @@ public final class EmulatorManager: Sendable {
 
         var args = ["-avd", name, "-gpu", "host", "-memory", "2048", "-dns-server", "8.8.8.8"]
         if headless {
-            args += ["-no-window", "-no-audio", "-no-boot-anim"]
+            // No window and no boot animation, but keep audio: the embedded
+            // screen streams the phone's sound over scrcpy, and `-no-audio`
+            // would leave the guest with no audio device to capture.
+            args += ["-no-window", "-no-boot-anim"]
         }
 
         let process = Process()

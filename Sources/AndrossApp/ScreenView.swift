@@ -100,6 +100,7 @@ struct ScreenAppView: View {
 
     @State private var displayView = ScrcpyDisplayView(frame: .zero)
     @State private var client: ScrcpyClient?
+    @State private var audioPlayer: AudioPlayer?
     @State private var devicePixels: CGSize = .zero
     @State private var isStreaming = false
     @State private var posterImage: NSImage?
@@ -439,7 +440,40 @@ struct ScreenAppView: View {
         }
 
         isStreaming = true
-        defer { newClient.stop() }
+
+        // Audio rides its own socket alongside video. A device that can't
+        // capture — an emulator once booted `-no-audio`, Android < 11 — answers
+        // `.unavailable` and the engine never starts, so the screen is
+        // untouched by audio's absence. The reading task owns the whole engine
+        // lifecycle (start on first packet, stop when the socket closes), so
+        // teardown is just closing the client: that ends the stream, and the
+        // task stops the player itself.
+        let audioTask: Task<Void, Never>?
+        if let player = AudioPlayer() {
+            audioPlayer = player
+            audioTask = Task.detached(priority: .userInitiated) {
+                guard let audioStream = newClient.makeAudioStream() else { return }
+                var engineUp = false
+                loop: for await audio in audioStream {
+                    switch audio {
+                    case .unavailable:
+                        break loop
+                    case .pcm(let pcm):
+                        if !engineUp { engineUp = true; player.start() }
+                        player.enqueue(pcm)
+                    }
+                }
+                player.stop()
+            }
+        } else {
+            audioTask = nil
+        }
+
+        defer {
+            audioTask?.cancel()
+            audioPlayer = nil
+            newClient.stop()
+        }
 
         let foregroundCheckInterval: TimeInterval = 2
         var lastForegroundCheck = Date()
