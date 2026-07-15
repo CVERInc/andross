@@ -159,6 +159,28 @@ public final class EmulatorManager: Sendable {
         return AndrossParse.avdNames(from: result.stdout)
     }
 
+    /// Map each AVD id to the human name to show for it, read from the AVD's
+    /// config.ini (`avd.ini.displayname`). Ids with no stored display name map
+    /// to themselves, so a caller can always resolve *some* name.
+    public func avdDisplayNames(for ids: [String]) -> [String: String] {
+        let avdRoot = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".android").appendingPathComponent("avd")
+        var map: [String: String] = [:]
+        for id in ids {
+            map[id] = id
+            let config = avdRoot.appendingPathComponent("\(id).avd")
+                .appendingPathComponent("config.ini")
+            guard let text = try? String(contentsOf: config, encoding: .utf8) else { continue }
+            for line in text.components(separatedBy: .newlines) where line.hasPrefix("avd.ini.displayname=") {
+                let value = String(line.dropFirst("avd.ini.displayname=".count))
+                    .trimmingCharacters(in: .whitespaces)
+                if !value.isEmpty { map[id] = value }
+                break
+            }
+        }
+        return map
+    }
+
     /// Supported Android device profile configurations (sizes and orientations)
     public enum DeviceProfile: Int, Sendable, CaseIterable {
         case phonePortrait = 1
@@ -226,6 +248,7 @@ public final class EmulatorManager: Sendable {
     /// Create a new virtual device (AVD) and download required SDK components.
     public func createAVD(
         name: String,
+        displayName: String,
         type: SystemType,
         profile: DeviceProfile,
         apiLevel: Int = EmulatorManager.defaultAPILevel,
@@ -252,7 +275,14 @@ public final class EmulatorManager: Sendable {
         let createResult = Shell.run(createArgs, stdin: "no\n")
 
         guard createResult.ok else {
-            onProgress("Failed to create Android Virtual Device (AVD).", false)
+            // Surface the real reason (bad name, missing image, license) rather
+            // than a dead-end "failed" — the in-app log is the only breadcrumb.
+            let reason = [createResult.stderr, createResult.stdout]
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first { !$0.isEmpty }?
+                .components(separatedBy: .newlines)
+                .first { $0.localizedCaseInsensitiveContains("error") } ?? ""
+            onProgress(reason.isEmpty ? "Couldn't create the phone." : "Couldn't create the phone — \(reason)", false)
             return false
         }
 
@@ -270,11 +300,18 @@ public final class EmulatorManager: Sendable {
                 let l = line.trimmingCharacters(in: .whitespacesAndNewlines)
                 return !l.hasPrefix("hw.lcd.width") &&
                        !l.hasPrefix("hw.lcd.height") &&
-                       !l.hasPrefix("hw.lcd.density")
+                       !l.hasPrefix("hw.lcd.density") &&
+                       !l.hasPrefix("avd.ini.displayname")
             }
             lines.append("hw.lcd.width=\(profile.width)")
             lines.append("hw.lcd.height=\(profile.height)")
             lines.append("hw.lcd.density=\(profile.density)")
+            // The clean id above is what avdmanager/adb/emulator use; the name
+            // the user actually typed (spaces, CJK, whatever) lives here as the
+            // native AVD display name so the UI can show it verbatim.
+            if !displayName.isEmpty {
+                lines.append("avd.ini.displayname=\(displayName)")
+            }
             try? lines.joined(separator: "\n").write(to: configPath, atomically: true, encoding: .utf8)
         }
 

@@ -261,7 +261,7 @@ expectEqual(EmulatorManager.defaultAPILevel, 34, "default API level is 34 (Andro
 expect(EmulatorManager.supportedAPILevels.contains(EmulatorManager.defaultAPILevel),
        "default API level is offered in the picker")
 expect(AppCatalog.androidVersionName(apiLevel: 34).contains("Android 14"), "API 34 labelled Android 14")
-expectEqual(AppCatalog.androidVersionName(apiLevel: 99), "API 99", "unknown API level falls back to raw")
+expectEqual(AppCatalog.androidVersionName(apiLevel: 99), "Android (API 99)", "unknown API level still reads as Android, with the raw level")
 
 // MARK: lsFileSize — robustness vs numeric filenames & malformed rows
 

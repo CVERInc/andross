@@ -98,12 +98,31 @@ func humanBytes(_ bytes: Int64) -> String {
     bytes <= 0 ? "—" : ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
 }
 
+/// avdmanager rejects any AVD name outside [a-zA-Z0-9._-] ("contains invalid
+/// characters"), so a typed space or CJK name silently fails to create.
+/// Clean whatever the user types live — spaces become hyphens, other stray
+/// characters are dropped — so the name in the field always builds.
+func sanitizeAVDName(_ raw: String) -> String {
+    var out = ""
+    for ch in raw {
+        if ch == " " {
+            out.append("-")
+        } else if ch.isASCII && (ch.isLetter || ch.isNumber || ch == "." || ch == "_" || ch == "-") {
+            out.append(ch)
+        }
+    }
+    return out
+}
+
 // GUI State Control Model
 @MainActor
 final class AppModel: ObservableObject {
     static let shared = AppModel()
 
     @Published var avds: [String] = []
+    /// AVD id → the name to show for it. Operations use the id in `avds`;
+    /// every visible surface resolves through here via `displayName(for:)`.
+    @Published var avdDisplayNames: [String: String] = [:]
     @Published var selectedAVD: String?
     @Published var logs: [String] = []
     @Published var isCreating = false
@@ -224,6 +243,7 @@ final class AppModel: ObservableObject {
     private var refreshTimer: Timer?
 
     init() {
+        loadPersistedLogs()
         refreshAVDs()
         checkDependencies()
         refreshStorageStats()
@@ -244,8 +264,10 @@ final class AppModel: ObservableObject {
     func refreshAVDs() {
         Task.detached(priority: .userInitiated) {
             let list = EmulatorManager.shared.listAVDs()
+            let names = EmulatorManager.shared.avdDisplayNames(for: list)
             await MainActor.run {
                 self.avds = list
+                self.avdDisplayNames = names
                 if self.selectedAVD == nil {
                     self.selectedAVD = list.first
                 }
@@ -261,6 +283,15 @@ final class AppModel: ObservableObject {
         refreshIdentities()
     }
     
+    /// The name to show for an AVD id — its stored display name, or the id
+    /// itself when none was set (older phones, or names that were already clean).
+    func displayName(for id: String) -> String {
+        avdDisplayNames[id] ?? id
+    }
+
+    /// Display name of the running phone (activeDeviceName holds the id).
+    var activeDisplayName: String { displayName(for: activeDeviceName) }
+
     func checkDependencies() {
         depStatus = EmulatorManager.shared.checkStatus()
     }
@@ -268,10 +299,60 @@ final class AppModel: ObservableObject {
     func log(_ message: String, transient: Bool = false) {
         logBuffer.append(message, transient: transient)
         logs = logBuffer.lines
+        // Persist permanent lines only — transient (\r progress) lines would
+        // flood the file. This is the breadcrumb that survives a restart, so a
+        // failure can be read back instead of reproduced.
+        if !transient { AppModel.persistLog(message) }
     }
 
     func clearLogs() {
         logBuffer.clear()
+        logs = logBuffer.lines
+        AppModel.logFileQueue.async { try? Data().write(to: AppModel.logFileURL) }
+    }
+
+    // MARK: - Persistent activity log (~/.andross_tmp/andross.log)
+
+    static let logFileURL: URL = {
+        let dir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".andross_tmp")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("andross.log")
+    }()
+    static let logFileQueue = DispatchQueue(label: "andross.logfile")
+
+    /// Append one timestamped line, capping the file so it can't grow forever.
+    static func persistLog(_ message: String) {
+        let url = logFileURL
+        logFileQueue.async {
+            let fmt = DateFormatter()
+            fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
+            let line = "[\(fmt.string(from: Date()))] \(message)\n"
+            guard let data = line.data(using: .utf8) else { return }
+            let fm = FileManager.default
+            if let handle = try? FileHandle(forWritingTo: url) {
+                defer { try? handle.close() }
+                handle.seekToEndOfFile()
+                handle.write(data)
+            } else {
+                try? data.write(to: url)
+            }
+            // Trim to the last 128 KB once past 256 KB.
+            if let attrs = try? fm.attributesOfItem(atPath: url.path),
+               let size = attrs[.size] as? Int, size > 256 * 1024,
+               let all = try? Data(contentsOf: url) {
+                try? all.suffix(128 * 1024).write(to: url)
+            }
+        }
+    }
+
+    /// Seed the in-app log from the file on launch, so past sessions' activity
+    /// (and failures) are visible in System → Activity without reproducing.
+    private func loadPersistedLogs() {
+        guard let text = try? String(contentsOf: AppModel.logFileURL, encoding: .utf8) else { return }
+        let recent = text.components(separatedBy: .newlines)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            .suffix(50)
+        for line in recent { logBuffer.append(line) }
         logs = logBuffer.lines
     }
     
@@ -583,7 +664,7 @@ final class AppModel: ObservableObject {
 
     func launchApp(packageName: String) {
         guard let serial = activeSerial else { return }
-        log("Opening \(AppCatalog.displayName(for: packageName)) on \(activeDeviceName)…")
+        log("Opening \(AppCatalog.displayName(for: packageName)) on \(activeDisplayName)…")
         Task.detached(priority: .userInitiated) {
             let ok = EmulatorManager.shared.launchApp(serial: serial, packageName: packageName)
             if !ok {
@@ -766,11 +847,16 @@ final class AppModel: ObservableObject {
     }
     
     func createNewPhone() {
-        guard !newName.isEmpty else { return }
-        progressMessage = "Creating phone [\(newName)]…"
+        let displayName = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !displayName.isEmpty else { return }
+
+        // The user's text is the display name; derive a clean, unique id for
+        // the tools (avdmanager only accepts [a-zA-Z0-9._-]).
+        let id = uniqueAVDID(from: displayName)
+
+        progressMessage = "Creating phone [\(displayName)]…"
         isCreating = true
-        
-        let name = newName
+
         let typeVal = newType
         let profileVal = newProfile
         let apiVal = newAPILevel
@@ -778,32 +864,62 @@ final class AppModel: ObservableObject {
         Task.detached(priority: .userInitiated) {
             let type = EmulatorManager.SystemType(rawValue: typeVal) ?? .googlePlay
             let profile = EmulatorManager.DeviceProfile(rawValue: profileVal) ?? .phonePortrait
-            _ = await EmulatorManager.shared.createAVD(name: name, type: type, profile: profile, apiLevel: apiVal) { progress, transient in
-                Task { @MainActor in
-                    self.log(progress, transient: transient)
-                }
+            let ok = await EmulatorManager.shared.createAVD(
+                name: id, displayName: displayName, type: type, profile: profile, apiLevel: apiVal
+            ) { progress, transient in
+                Task { @MainActor in self.log(progress, transient: transient) }
             }
-            
+
             await MainActor.run {
                 self.isCreating = false
-                self.newName = ""
-                self.refreshAVDs()
-                self.selectedAVD = name
+                if ok {
+                    self.newName = ""
+                    self.refreshAVDs()
+                    self.selectedAVD = id
+                } else {
+                    self.presentCreateFailure(displayName: displayName)
+                }
             }
         }
+    }
+
+    /// Turn a display name into an AVD id avdmanager accepts, unique against
+    /// existing phones (append -2, -3… on collision; never empty).
+    private func uniqueAVDID(from displayName: String) -> String {
+        var base = sanitizeAVDName(displayName)
+        while base.contains("--") { base = base.replacingOccurrences(of: "--", with: "-") }
+        base = base.trimmingCharacters(in: CharacterSet(charactersIn: "-._"))
+        if base.isEmpty { base = "phone" }
+        let existing = Set(avds)
+        if !existing.contains(base) { return base }
+        var n = 2
+        while existing.contains("\(base)-\(n)") { n += 1 }
+        return "\(base)-\(n)"
+    }
+
+    /// A create attempt failed — show the real reason (per Phase 4.4) rather
+    /// than silently dropping the user back to the list.
+    private func presentCreateFailure(displayName: String) {
+        let alert = NSAlert()
+        alert.messageText = "Couldn't create \(displayName)"
+        alert.informativeText = logs.last ?? "The phone couldn't be created. See System → Activity for details."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
     
     func deleteSelected() {
         guard let name = selectedAVD else { return }
+        let shown = displayName(for: name)
         let alert = NSAlert()
-        alert.messageText = "Move [\(name)] to the Trash?"
+        alert.messageText = "Move [\(shown)] to the Trash?"
         alert.informativeText = "This moves the phone and all its data to the Trash. It stays recoverable until you empty the Trash."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Move to Trash")
         alert.addButton(withTitle: "Cancel")
 
         if alert.runModal() == .alertFirstButtonReturn {
-            log("Moving [\(name)] to the Trash…")
+            log("Moving [\(shown)] to the Trash…")
             Task.detached(priority: .userInitiated) {
                 // Shut down first: a running phone holds its .avd files open, so
                 // they can't be trashed cleanly out from under it.
@@ -1563,7 +1679,7 @@ struct ContentView: View {
                                     model.openScreen()
                                 } label: {
                                     HStack(spacing: 5) {
-                                        Text("\(model.activeDeviceName) · \(identityName)")
+                                        Text("\(model.activeDisplayName) · \(identityName)")
                                         Image(systemName: "play.display")
                                             .font(.system(size: 9))
                                             .foregroundStyle(Color.androidGreen)
@@ -1625,7 +1741,7 @@ struct ContentView: View {
                             // the island (an action, not a place); Profiles fold into
                             // Phones. Four steady tiles — the settled rhythm the
                             // maintainer missed — with labels revealing on hover.
-                            HStack(spacing: model.isLandscape ? 30 : 18) {
+                            HStack(spacing: model.isLandscape ? 40 : 16) {
                                 dockIcon(title: "Phones", icon: "iphone", showLabel: dockHovering) {
                                     withAnimation(.easeIn(duration: 0.15)) { model.activeApp = .devices }
                                 }
@@ -1639,10 +1755,9 @@ struct ContentView: View {
                                     withAnimation(.easeIn(duration: 0.15)) { model.activeApp = .settings }
                                 }
                             }
-                            .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
-                            .liquidGlassBackground(cornerRadius: 30)
                             .padding(.horizontal, 20)
+                            .liquidGlassBackground(cornerRadius: 30)
                             .padding(.bottom, 20)
                             .padding(.top, 6)
                             .onHover { hovering in
@@ -1758,12 +1873,15 @@ struct ContentView: View {
         // Create Device Sheet
         .sheet(isPresented: $showCreateSheet) {
             VStack(spacing: 16) {
-                Text("Create New Virtual Phone").font(.headline)
-                
-                TextField("Device name (e.g. line-creator)", text: $model.newName)
+                Text("Create a phone").font(.headline)
+
+                // Free text — spaces, CJK, an email, anything. This is the
+                // phone's display name; a clean AVD id is derived from it at
+                // create time, so the name can no longer make creation fail.
+                TextField("Name this phone", text: $model.newName)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 260)
-                
+
                 Picker("System", selection: $model.newType) {
                     Text("Google Play — Play Store built in").tag(1)
                     Text("Open source — apps via Aurora Store").tag(2)
@@ -1814,7 +1932,7 @@ struct ContentView: View {
         case .storage: return "Storage"
         case .settings: return "Settings"
         case .system: return "System"
-        case .screen: return model.activeDeviceName.isEmpty ? "Screen" : model.activeDeviceName
+        case .screen: return model.activeDeviceName.isEmpty ? "Screen" : model.activeDisplayName
         }
     }
     
@@ -1840,11 +1958,11 @@ struct ContentView: View {
         Button(action: action) {
             VStack(spacing: 7) {
                 Image(systemName: icon)
-                    .font(.system(size: 21))
+                    .font(.system(size: 24))
                     .foregroundStyle(tint)
-                    .frame(width: 52, height: 52)
+                    .frame(width: 58, height: 58)
                     .background(Color.white.opacity(0.06))
-                    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
                 if showLabel {
                     Text(title)
@@ -1943,7 +2061,7 @@ struct DevicesAppView: View {
                     HStack {
                         Image(systemName: "iphone")
                             .foregroundStyle(isRunning ? Color.androidGreen : Color.slateTextDim)
-                        Text(name)
+                        Text(model.displayName(for: name))
                             .font(.body)
                         Spacer()
 
@@ -1958,7 +2076,7 @@ struct DevicesAppView: View {
                             // Launch button
                             Button {
                                 model.selectedAVD = name
-                                model.log("Starting [\(name)]…")
+                                model.log("Starting [\(model.displayName(for: name))]…")
                                 let ok = EmulatorManager.shared.startAVD(name: name, headless: model.headlessBoot)
                                 if ok {
                                     model.log(model.headlessBoot
