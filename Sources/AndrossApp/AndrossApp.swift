@@ -1620,13 +1620,13 @@ struct ContentView: View {
 
                             // Dock: two places, nothing else. Power moved to the
                             // island (an action, not a place); Profiles fold into
-                            // Phones. With only two, the labels stay always on and
-                            // it reads as a utility bar, not a second app row.
+                            // Phones. Labels still reveal on hover — the idle dock
+                            // stays two quiet glyphs, not a labelled app row.
                             HStack(spacing: model.isLandscape ? 48 : 36) {
-                                dockIcon(title: "Phones", icon: "iphone", showLabel: true) {
+                                dockIcon(title: "Phones", icon: "iphone", showLabel: dockHovering) {
                                     withAnimation(.easeIn(duration: 0.15)) { model.activeApp = .devices }
                                 }
-                                dockIcon(title: "Settings", icon: "gearshape", showLabel: true) {
+                                dockIcon(title: "Settings", icon: "gearshape", showLabel: dockHovering) {
                                     withAnimation(.easeIn(duration: 0.15)) { model.activeApp = .settings }
                                 }
                             }
@@ -1674,7 +1674,11 @@ struct ContentView: View {
                 }
             }
             .frame(width: model.currentWidth, height: model.currentHeight)
-            .background(Color.slateDeep.opacity(0.2))
+            // Enough slate to give the text a consistent ground — the old 0.2
+            // let the desktop bleed through and washed it to mud — but not so
+            // much that it turns the liquid glass into a flat black brick. The
+            // frosted material still reads through; the tint just anchors it.
+            .background(Color.slateDeep.opacity(0.45))
             .background(WindowConfigurator(width: model.currentWidth, height: model.currentHeight)) // Apply NSWindow configurations
             
             // Overlay 2: Progress indicators for background tasks
