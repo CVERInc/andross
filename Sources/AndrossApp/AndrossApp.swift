@@ -152,7 +152,9 @@ final class AppModel: ObservableObject {
     // grid belongs to the user's own Android apps.
     enum ActiveApp: String, CaseIterable, Sendable {
         case devices
+        case storage
         case settings
+        case system
         case screen
     }
 
@@ -1528,7 +1530,7 @@ struct ContentView: View {
                             }
                             Spacer()
                         }
-                        .padding(.horizontal, 36)
+                        .padding(.horizontal, 24)
                         .padding(.top, 32)
                         .padding(.bottom, 12)
                         .background(Color.clear)
@@ -1543,7 +1545,8 @@ struct ContentView: View {
                         } else {
                             ScrollView {
                                 appContentView(activeApp)
-                                    .padding(16)
+                                    .padding(.horizontal, 24)
+                                    .padding(.vertical, 16)
                             }
                             .background(Color.clear)
                         }
@@ -1618,21 +1621,28 @@ struct ContentView: View {
                                 }
                             }
 
-                            // Dock: two places, nothing else. Power moved to the
-                            // island (an action, not a place); Profiles fold into
-                            // Phones. Labels still reveal on hover — the idle dock
-                            // stays two quiet glyphs, not a labelled app row.
-                            HStack(spacing: model.isLandscape ? 48 : 36) {
+                            // Dock: four fixed places, nothing else. Power moved to
+                            // the island (an action, not a place); Profiles fold into
+                            // Phones. Four steady tiles — the settled rhythm the
+                            // maintainer missed — with labels revealing on hover.
+                            HStack(spacing: model.isLandscape ? 30 : 18) {
                                 dockIcon(title: "Phones", icon: "iphone", showLabel: dockHovering) {
                                     withAnimation(.easeIn(duration: 0.15)) { model.activeApp = .devices }
+                                }
+                                dockIcon(title: "Storage", icon: "internaldrive", showLabel: dockHovering) {
+                                    withAnimation(.easeIn(duration: 0.15)) { model.activeApp = .storage }
+                                }
+                                dockIcon(title: "System", icon: "cpu", showLabel: dockHovering) {
+                                    withAnimation(.easeIn(duration: 0.15)) { model.activeApp = .system }
                                 }
                                 dockIcon(title: "Settings", icon: "gearshape", showLabel: dockHovering) {
                                     withAnimation(.easeIn(duration: 0.15)) { model.activeApp = .settings }
                                 }
                             }
+                            .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
-                            .padding(.horizontal, 20)
                             .liquidGlassBackground(cornerRadius: 30)
+                            .padding(.horizontal, 20)
                             .padding(.bottom, 20)
                             .padding(.top, 6)
                             .onHover { hovering in
@@ -1801,7 +1811,9 @@ struct ContentView: View {
     private func activeAppTitle(_ app: AppModel.ActiveApp) -> String {
         switch app {
         case .devices: return "Phones"
+        case .storage: return "Storage"
         case .settings: return "Settings"
+        case .system: return "System"
         case .screen: return model.activeDeviceName.isEmpty ? "Screen" : model.activeDeviceName
         }
     }
@@ -1811,8 +1823,12 @@ struct ContentView: View {
         switch app {
         case .devices:
             DevicesAppView(model: model, showCreateSheet: $showCreateSheet)
+        case .storage:
+            StorageAppView(model: model)
         case .settings:
             SettingsAppView(model: model)
+        case .system:
+            SystemAppView(model: model)
         case .screen:
             ScreenAppView(model: model)
         }
@@ -1824,11 +1840,11 @@ struct ContentView: View {
         Button(action: action) {
             VStack(spacing: 7) {
                 Image(systemName: icon)
-                    .font(.system(size: 24))
+                    .font(.system(size: 21))
                     .foregroundStyle(tint)
-                    .frame(width: 58, height: 58)
+                    .frame(width: 52, height: 52)
                     .background(Color.white.opacity(0.06))
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
 
                 if showLabel {
                     Text(title)
@@ -2106,246 +2122,229 @@ struct ProfilesSection: View {
     }
 }
 
-// APP VIEW 6: Settings app
-struct SettingsAppView: View {
-    @ObservedObject var model: AppModel
-    
+/// The shared "roomy and readable" shell for the split system surfaces — a
+/// section title over a generous glass card. One place to keep Storage,
+/// System, and Settings reading the same spacious way, instead of the old
+/// cramped Settings lump of tiny type.
+struct SettingsCard<Content: View>: View {
+    let title: String
+    @ViewBuilder var content: () -> Content
+
     var body: some View {
-        VStack(spacing: 20) {
-            // Section 1: System Status
-            VStack(alignment: .leading, spacing: 12) {
-                Text("System Status")
-                    .font(.caption).bold()
-                    .foregroundStyle(Color.white)
-
-                VStack(spacing: 8) {
-                    dependencyRow(name: "Java runtime", active: model.depStatus.java)
-                    dependencyRow(name: "Android engine", active: model.depStatus.sdk)
-                    dependencyRow(name: "Homebrew", active: model.depStatus.brew)
-                }
-                .padding(10)
-                .liquidGlassBackground(cornerRadius: 8, customBorderColor: Color.white.opacity(0.1))
-
-                if !model.depStatus.java || !model.depStatus.sdk {
-                    if model.depStatus.brew {
-                        Button {
-                            model.fixDependencies()
-                        } label: {
-                            HStack {
-                                Spacer()
-                                Label("Install Missing Components", systemImage: "wrench.and.screwdriver.fill")
-                                    .font(.caption).bold()
-                                Spacer()
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.androidGreen)
-                        .controlSize(.small)
-                    } else {
-                        Text("Homebrew is needed to install the missing components — see brew.sh.")
-                            .font(.system(size: 10))
-                            .foregroundStyle(Color.slateRed)
-                            .multilineTextAlignment(.center)
-                            .padding(.top, 4)
-                    }
-                }
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.headline)
+                .foregroundStyle(.white)
+            VStack(alignment: .leading, spacing: 14) {
+                content()
             }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .liquidGlassBackground(cornerRadius: 14, customBorderColor: Color.white.opacity(0.1))
+        }
+    }
+}
 
-            // Section 2: Storage
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Storage")
-                        .font(.caption).bold()
-                        .foregroundStyle(Color.white)
-                    Spacer()
-                    Button {
-                        model.refreshStorageStats()
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 10))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Refresh storage")
-                }
+// APP VIEW: Storage — the space phones and apps take, and the way to reclaim it.
+struct StorageAppView: View {
+    @ObservedObject var model: AppModel
 
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text("andross app")
-                        Spacer()
-                        Text(model.hostAppSize.isEmpty ? "…" : model.hostAppSize).foregroundStyle(Color.white)
-                    }
-                    HStack {
-                        Text("Virtual phones (~/.android)")
-                        Spacer()
-                        Text(model.hostAvdSize.isEmpty ? "…" : model.hostAvdSize).foregroundStyle(Color.white)
-                    }
-                    HStack {
-                        Text("Temporary files (~/.andross_tmp)")
-                        Spacer()
-                        Text(model.hostTempSize.isEmpty ? "…" : model.hostTempSize).foregroundStyle(Color.white)
-                    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            SettingsCard(title: "On this Mac") {
+                storageRow("andross app", model.hostAppSize)
+                Divider().background(Color.white.opacity(0.08))
+                storageRow("Phones", model.hostAvdSize)
+                Divider().background(Color.white.opacity(0.08))
+                storageRow("Temporary files", model.hostTempSize)
 
-                    if !model.appStorageStats.isEmpty {
-                        Divider().background(Color.white.opacity(0.1))
-                        ForEach(model.appStorageStats, id: \.packageName) { app in
-                            HStack {
-                                Text(AppCatalog.displayName(for: app.packageName))
-                                    .foregroundStyle(Color.androidGreen)
-                                Spacer()
-                                Text(ByteCountFormatter.string(fromByteCount: app.totalKnownSize, countStyle: .file))
-                                    .foregroundStyle(Color.white)
-                            }
+                if !model.appStorageStats.isEmpty {
+                    Divider().background(Color.white.opacity(0.14))
+                    ForEach(model.appStorageStats, id: \.packageName) { app in
+                        storageRow(AppCatalog.displayName(for: app.packageName),
+                                   humanBytes(app.totalKnownSize), accent: true)
                             .help(app.packageName)
-                        }
-                        if model.appStorageStats.contains(where: { $0.dataSize == nil }) {
-                            Text("App data sizes aren't readable on Google Play system images.")
-                                .font(.system(size: 8))
-                                .foregroundStyle(Color.slateTextDim.opacity(0.7))
-                        }
                     }
                 }
-                .font(.caption2)
+
+                Button { model.refreshStorageStats() } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise").font(.caption)
+                }
+                .buttonStyle(.plain)
                 .foregroundStyle(Color.slateTextDim)
-                .padding(10)
-                .liquidGlassBackground(cornerRadius: 8, customBorderColor: Color.white.opacity(0.1))
+                .padding(.top, 2)
             }
+            .onAppear { model.refreshStorageStats() }
 
-            // Section 3: Recent activity
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Recent Activity")
-                        .font(.caption).bold()
-                        .foregroundStyle(Color.white)
-                    Spacer()
-                    if !model.logs.isEmpty {
-                        Button("Clear") { model.clearLogs() }
-                            .buttonStyle(.plain)
-                            .font(.caption2)
-                            .foregroundStyle(Color.slateTextDim)
-                    }
-                }
+            SettingsCard(title: "Uninstall andross") {
+                Text("Choose what to remove from your Mac, then clean up. This can't be undone.")
+                    .font(.footnote).foregroundStyle(Color.slateTextDim)
 
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 3) {
-                        if model.logs.isEmpty {
-                            Text("Nothing here yet — phone and app actions will appear as they happen.")
-                                .font(.system(size: 9, design: .monospaced))
-                                .foregroundStyle(Color.slateTextDim)
-                        } else {
-                            ForEach(Array(model.logs.enumerated()), id: \.offset) { _, line in
-                                Text(line)
-                                    .font(.system(size: 9, design: .monospaced))
-                                    .foregroundStyle(Color.white.opacity(0.85))
-                            }
-                        }
-                    }
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(height: 120)
-                .liquidGlassBackground(cornerRadius: 8, customBorderColor: Color.white.opacity(0.1))
-            }
-
-            // Section 4: Phones
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Phones")
-                    .font(.caption).bold()
-                    .foregroundStyle(Color.white)
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Toggle("Keep the phone inside this window", isOn: $model.headlessBoot)
-                        .font(.caption2)
-                        .foregroundStyle(Color.slateTextDim)
-                        .toggleStyle(.checkbox)
-                    Text("Boots without a separate emulator window — the phone lives here in the Screen view.")
-                        .font(.system(size: 8))
-                        .foregroundStyle(Color.slateTextDim.opacity(0.7))
-                        .padding(.bottom, 4)
-
-                    Toggle("Remember window position", isOn: $model.rememberWindowPosition)
-                        .font(.caption2)
-                        .foregroundStyle(Color.slateTextDim)
-                        .toggleStyle(.checkbox)
-                    Text("Save and restore where you last dragged the window on your screen.")
-                        .font(.system(size: 8))
-                        .foregroundStyle(Color.slateTextDim.opacity(0.7))
-                }
-                .padding(10)
-                .liquidGlassBackground(cornerRadius: 8, customBorderColor: Color.white.opacity(0.1))
-
-                Button(role: .destructive) {
-                    model.log("Shutting down all phones…")
-                    Task.detached(priority: .userInitiated) {
-                        let count = EmulatorManager.shared.stopAll()
-                        await MainActor.run {
-                            model.log(count > 0 ? "Stopped \(count) phone(s)." : "No phone is running.")
-                            model.refreshIdentities()
-                        }
-                    }
-                } label: {
-                    HStack {
-                        Spacer()
-                        Label("Shut Down Phone", systemImage: "stop.circle.fill")
-                            .font(.caption).bold()
-                        Spacer()
-                    }
-                }
-                .buttonStyle(.bordered)
-                .tint(.slateRed)
-                .controlSize(.small)
-            }
-
-            // Section 5: Clean uninstall — folded away by default so a panel
-            // of erase-everything checkboxes isn't sitting open in Settings.
-            DisclosureGroup("Uninstall andross…") {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 12) {
                     Toggle("Delete all phones and their data", isOn: $model.uninstallDeleteAVDs)
                     Toggle("Remove the Android engine (Homebrew)", isOn: $model.uninstallSdk)
                     Toggle("Remove the Java runtime (Homebrew)", isOn: $model.uninstallJava)
                     Toggle("Delete temporary files", isOn: $model.uninstallTemp)
                 }
-                .font(.caption2)
-                .foregroundStyle(Color.slateTextDim)
+                .font(.callout)
+                .foregroundStyle(Color.white.opacity(0.9))
                 .toggleStyle(.checkbox)
-                .padding(.top, 10)
+                .padding(.vertical, 4)
 
                 Button(role: .destructive) {
                     let alert = NSAlert()
                     alert.messageText = "Clean Uninstall andross?"
-                    alert.informativeText = "This action will permanently delete/purge the selected components from your Mac. This cannot be undone."
+                    alert.informativeText = "This permanently removes the selected components from your Mac. This cannot be undone."
                     alert.alertStyle = .critical
                     alert.addButton(withTitle: "Uninstall & Purge")
                     alert.addButton(withTitle: "Cancel")
-                    
                     if alert.runModal() == .alertFirstButtonReturn {
                         model.runCleanUninstall()
                     }
                 } label: {
-                    HStack {
-                        Spacer()
-                        Label("Uninstall and Clean Up…", systemImage: "trash.fill")
-                            .font(.caption).bold()
-                        Spacer()
-                    }
+                    HStack { Spacer()
+                        Label("Uninstall and Clean Up…", systemImage: "trash.fill").font(.callout).bold()
+                        Spacer() }
+                        .padding(.vertical, 4)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.slateRed)
-                .controlSize(.small)
             }
         }
     }
-    
+
+    private func storageRow(_ name: String, _ value: String, accent: Bool = false) -> some View {
+        HStack {
+            Text(name).foregroundStyle(accent ? Color.androidGreen : Color.white.opacity(0.9))
+            Spacer()
+            Text(value.isEmpty ? "…" : value).foregroundStyle(.white)
+        }
+        .font(.callout)
+    }
+}
+
+// APP VIEW: System — what's under the hood: the engine, the version, the log.
+struct SystemAppView: View {
+    @ObservedObject var model: AppModel
+
+    private var appVersion: String {
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "—"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            SettingsCard(title: "Engine") {
+                dependencyRow(name: "Java runtime", active: model.depStatus.java)
+                Divider().background(Color.white.opacity(0.08))
+                dependencyRow(name: "Android engine", active: model.depStatus.sdk)
+                Divider().background(Color.white.opacity(0.08))
+                dependencyRow(name: "Homebrew", active: model.depStatus.brew)
+
+                if !model.depStatus.java || !model.depStatus.sdk {
+                    if model.depStatus.brew {
+                        Button { model.fixDependencies() } label: {
+                            HStack { Spacer()
+                                Label("Install Missing Components", systemImage: "wrench.and.screwdriver.fill")
+                                    .font(.caption).bold()
+                                Spacer() }
+                        }
+                        .buttonStyle(.borderedProminent).tint(.androidGreen).controlSize(.small)
+                        .padding(.top, 4)
+                    } else {
+                        Text("Homebrew is needed to install the missing components — see brew.sh.")
+                            .font(.footnote).foregroundStyle(Color.slateRed)
+                    }
+                }
+            }
+
+            SettingsCard(title: "Activity") {
+                if model.logs.isEmpty {
+                    Text("Nothing here yet — phone and app actions show up as they happen.")
+                        .font(.callout).foregroundStyle(Color.slateTextDim)
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(Array(model.logs.enumerated()), id: \.offset) { _, line in
+                                Text(line).font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(Color.white.opacity(0.85))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }
+                    .frame(height: 160)
+                    Button("Clear") { model.clearLogs() }
+                        .buttonStyle(.plain).font(.caption).foregroundStyle(Color.slateTextDim)
+                }
+            }
+
+            HStack {
+                Text("andross").font(.callout).foregroundStyle(Color.white.opacity(0.7))
+                Spacer()
+                Text("Version \(appVersion)").font(.callout).foregroundStyle(Color.slateTextDim)
+            }
+            .padding(.horizontal, 4)
+        }
+    }
+
     private func dependencyRow(name: String, active: Bool) -> some View {
         HStack {
             Image(systemName: active ? "checkmark.circle.fill" : "xmark.circle.fill")
                 .foregroundStyle(active ? Color.androidGreen : Color.slateRed)
-            Text(name)
-                .font(.caption2)
-                .foregroundStyle(Color.white.opacity(0.9))
+            Text(name).foregroundStyle(Color.white.opacity(0.9))
             Spacer()
             Text(active ? "Ready" : "Not installed")
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(active ? Color.androidGreen : Color.slateRed)
+        }
+        .font(.callout)
+    }
+}
+
+// APP VIEW: Settings — real preferences only, no longer a kitchen sink.
+struct SettingsAppView: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            SettingsCard(title: "Window") {
+                prefToggle("Keep the phone inside this window",
+                           "Boots without a separate window — the phone lives here in the Screen view.",
+                           $model.headlessBoot)
+                Divider().background(Color.white.opacity(0.08))
+                prefToggle("Remember window position",
+                           "Reopen where you last left the window on screen.",
+                           $model.rememberWindowPosition)
+            }
+
+            SettingsCard(title: "Power") {
+                Text("Turn the running phone off. It keeps its apps and data for next time.")
+                    .font(.footnote).foregroundStyle(Color.slateTextDim)
+
+                Button(role: .destructive) {
+                    model.log("Shutting the phone down…")
+                    Task.detached(priority: .userInitiated) {
+                        let count = EmulatorManager.shared.stopAll()
+                        await MainActor.run {
+                            model.log(count > 0 ? "Phone shut down." : "No phone is running.")
+                            model.refreshIdentities()
+                        }
+                    }
+                } label: {
+                    HStack { Spacer()
+                        Label("Shut Down Phone", systemImage: "stop.circle.fill").font(.callout).bold()
+                        Spacer() }
+                        .padding(.vertical, 4)
+                }
+                .buttonStyle(.bordered).tint(.slateRed)
+            }
+        }
+    }
+
+    private func prefToggle(_ title: String, _ detail: String, _ isOn: Binding<Bool>) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(title, isOn: isOn)
+                .font(.callout).foregroundStyle(.white).toggleStyle(.checkbox)
+            Text(detail).font(.footnote).foregroundStyle(Color.slateTextDim)
         }
     }
 }
