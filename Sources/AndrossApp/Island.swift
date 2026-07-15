@@ -35,7 +35,16 @@ struct Island<Trailing: View>: View {
     private let idleWidth: CGFloat = 90
     private let idleHeight: CGFloat = 26
 
-    private var expanded: Bool { alwaysExpanded || hovering }
+    /// Touch mode (phone screen only): the island stops grabbing the mouse so a
+    /// press-drag reaches the streamed screen's touch layer even at the very top
+    /// edge — the notch otherwise eats exactly the grab you need to pull the
+    /// shade. The bar still shows so its controls (the way back out included)
+    /// stay live; only its drag-fill goes transparent to the press.
+    private var touchMode: Bool { model.touchMode && model.activeApp == .screen }
+
+    /// Held open in touch mode so the controls — and the toggle back out —
+    /// never hide behind a notch you can no longer summon.
+    private var expanded: Bool { alwaysExpanded || hovering || touchMode }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -120,9 +129,14 @@ struct Island<Trailing: View>: View {
         // the window. The wordmark opts out of hit-testing so it can't shadow
         // the drag.
         ZStack {
+            // In touch mode the fill hands the press straight through to the
+            // screen's touch layer beneath, so a drag started on the bar pulls
+            // the shade instead of moving the window; the controls above keep
+            // their own hit-testing and stay tappable.
             Rectangle().fill(Color.black)
                 .contentShape(Rectangle())
                 .gesture(windowDrag)
+                .allowsHitTesting(!touchMode)
             HStack(spacing: 0) {
                 lights
                 Spacer(minLength: 24)

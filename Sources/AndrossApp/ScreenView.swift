@@ -197,8 +197,12 @@ struct ScreenAppView: View {
                     .aspectRatio(screenAspect, contentMode: .fit)
                     .clipShape(RoundedRectangle(cornerRadius: Self.screenCornerRadius, style: .continuous))
                     .overlay(
+                        // The edge goes green in touch mode: a quiet "safe mode"
+                        // tell that the window won't drag and every press is now
+                        // a finger on the phone.
                         RoundedRectangle(cornerRadius: Self.screenCornerRadius, style: .continuous)
-                            .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                            .stroke(model.touchMode ? Color.androidGreen.opacity(0.9) : Color.white.opacity(0.1),
+                                    lineWidth: model.touchMode ? 2 : 1)
                     )
                 } else if let posterImage {
                     // Degraded fallback: scrcpy failed to start (bad/missing

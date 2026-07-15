@@ -161,6 +161,12 @@ final class AppModel: ObservableObject {
     
     @Published var activeApp: ActiveApp? = nil
 
+    /// Touch mode: while on, the island stops grabbing the mouse so a press-drag
+    /// on the streamed screen reaches the touch layer even at the very top edge —
+    /// the notch otherwise eats exactly the grab you need to pull the shade down.
+    /// Transient (not persisted); it only means anything while the screen is up.
+    @Published var touchMode = false
+
     /// The size/rotation picker anchored to the green light. Lives on the model
     /// because the green light and the menu render in different hosting views.
     @Published var sizeMenuVisible = false
@@ -903,6 +909,19 @@ private struct ChipBarView: View {
             .accessibilityLabel(model.audioMuted ? "Unmute Phone Audio" : "Mute Phone Audio")
 
             navKey(icon: "chevron.backward", key: .back, label: "Back")
+
+            Button {
+                withAnimation(.easeOut(duration: 0.15)) { model.touchMode.toggle() }
+            } label: {
+                Image(systemName: model.touchMode ? "hand.tap.fill" : "hand.tap")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(model.touchMode ? Color.androidGreen : Color.white.opacity(0.85))
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.plain)
+            .help(model.touchMode ? "Exit Touch Mode — window is draggable again"
+                                  : "Touch Mode — drag the phone directly (window won't move)")
+            .accessibilityLabel("Touch Mode")
 
             Button {
                 withAnimation(.easeOut(duration: 0.15)) { model.activeApp = nil }
