@@ -54,17 +54,32 @@ struct Island<Trailing: View>: View {
     var body: some View {
         ZStack(alignment: .top) {
             if expanded {
+                // While open the whole bar holds it open, and leaving it (down
+                // into the screen) closes it. The bar covers the phone's status
+                // bar, which is fine because it's now here on purpose.
                 expandedBar
+                    .onHover { inside in
+                        guard !alwaysExpanded else { return }
+                        setHovering(inside)
+                    }
             } else {
+                // Only the notch opens the bar — never the full width. Hovering
+                // the sides, where the phone draws its own clock and battery,
+                // must leave those reachable rather than summon a bar on top of
+                // the very thing you reached for. Opening only; the expanded bar
+                // owns closing, so the notch→bar hand-off can't flicker.
                 idleNotch
+                    .onHover { inside in
+                        if inside { setHovering(true) }
+                    }
             }
         }
         .frame(maxWidth: .infinity, alignment: .top)
-        .onHover { inside in
-            guard !alwaysExpanded else { return }
-            withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
-                hovering = inside
-            }
+    }
+
+    private func setHovering(_ value: Bool) {
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+            hovering = value
         }
     }
 
