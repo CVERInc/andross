@@ -52,24 +52,28 @@ The same object is called Devices / Your Virtual Phones / virtual device / AVD
 | Android version in UI | **Android 16** (release name) | API level 36 |
 | image flavor | "with Google Play" / "without Google (Aurora Store)" / "bare Android" | Play Store / AOSP+Aurora / Blank AOSP |
 
-## Phase 3 — The shell: dissolve the dock, power to the island
+## Phase 3 — The shell: island = hardware, dock = places
 
-The dock mixes one *action* (Power) with three *places*, hides its labels, and
-its 4-across rhythm fights the grid's 3-across (maintainer's catch). A real
-phone has neither: places are apps, power is hardware.
+The dock stays (maintainer's call). What was wrong was that it *mixed an
+action with places* and so ran 4-across against the grid's 3 (maintainer's
+catch). Fix the mix, not the dock: give each layer one job.
 
-1. **Power moves to the island** — the island is andross's hardware chrome
-   (same reasoning that gave it the traffic lights). Home island, trailing
-   side: when a phone exists and is off → a power button that boots it; when
-   running → the existing screen/pop-out controls (power-off lives in the
-   Phones surface and the ✕ flow, shutdown-while-using is rare).
-2. **Places become system tiles.** "Phones" and "Settings" join the app grid
-   as its last tiles, visually system-flavored (outlined green, like the dock
-   icons today) but on the same 3-column rhythm. Dock deleted. The bottom pill
-   (Android's own gesture bar) stays as the one way back from any surface —
-   that's the phone metaphor working for us.
+- **Island = the hardware layer** — power + window chrome (same reasoning that
+  gave it the traffic lights).
+- **Dock = the places layer** — the surfaces you navigate to, nothing else.
+
+1. **Power moves off the dock, onto the island.** Home island, trailing side:
+   when a phone exists and is off → a power button that boots it; when running →
+   the existing screen/pop-out controls. (Power-off lives in the Phones surface
+   and the ✕ flow; shutting down mid-use is rare.)
+2. **Dock keeps only places.** With Power gone and Sandboxes folded away (below),
+   the dock is **Phones + Settings** — two place-tiles, centered. Labels can
+   stay always-on now that there are only two. It reads as a deliberate utility
+   bar, not a second app row competing with the grid.
 3. **Sandboxes surface deleted**; Profiles render as a section inside a
    phone's page in Phones. (A profile is a property of a phone, not a place.)
+   This is also what shrinks the dock to two — the rhythm clash resolves as a
+   side effect of putting each thing in its right layer.
 
 ## Phase 4 — The journey: empty → running, one path
 
