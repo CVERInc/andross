@@ -152,7 +152,6 @@ final class AppModel: ObservableObject {
     // grid belongs to the user's own Android apps.
     enum ActiveApp: String, CaseIterable, Sendable {
         case devices
-        case sandboxes
         case settings
         case screen
     }
@@ -997,6 +996,9 @@ private struct ChipBarView: View {
                 phoneControls
             } else if model.activeSerial != nil {
                 homeControls
+            } else if !model.avds.isEmpty {
+                // Phone off but one exists: the island carries the power key.
+                powerControl
             }
         }
         .frame(maxWidth: .infinity, alignment: .center)
@@ -1004,6 +1006,21 @@ private struct ChipBarView: View {
         // Flush to the window's top edge so the bar reads as the window's own
         // chrome gone black, its corners meeting the 55pt glass rounding.
         .ignoresSafeArea()
+    }
+
+    /// Home, phone off: the power key. It lives on the island — andross's
+    /// hardware chrome, beside the traffic lights — not as a place in the dock,
+    /// because turning the phone on is an action, not somewhere you navigate.
+    private var powerControl: some View {
+        Button { model.togglePower() } label: {
+            Image(systemName: "power")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(Color.androidGreen)
+                .frame(width: 20, height: 20)
+        }
+        .buttonStyle(.plain)
+        .help("Turn the phone on")
+        .accessibilityLabel("Turn the phone on")
     }
 
     /// Home: open/close the embedded screen, pop the phone window in/out.
@@ -1601,22 +1618,15 @@ struct ContentView: View {
                                 }
                             }
 
-                            // Dock: power + the three system surfaces.
-                            // Labels stay hidden until the pointer enters the dock.
-                            HStack(spacing: model.isLandscape ? 40 : 16) {
-                                dockIcon(title: model.activeSerial != nil ? "Power Off" : "Power On",
-                                         icon: "power",
-                                         tint: model.activeSerial != nil ? .androidGreen : .slateTextDim,
-                                         showLabel: dockHovering) {
-                                    model.togglePower()
-                                }
-                                dockIcon(title: "Phones", icon: "iphone", showLabel: dockHovering) {
+                            // Dock: two places, nothing else. Power moved to the
+                            // island (an action, not a place); Profiles fold into
+                            // Phones. With only two, the labels stay always on and
+                            // it reads as a utility bar, not a second app row.
+                            HStack(spacing: model.isLandscape ? 48 : 36) {
+                                dockIcon(title: "Phones", icon: "iphone", showLabel: true) {
                                     withAnimation(.easeIn(duration: 0.15)) { model.activeApp = .devices }
                                 }
-                                dockIcon(title: "Sandboxes", icon: "person.2", showLabel: dockHovering) {
-                                    withAnimation(.easeIn(duration: 0.15)) { model.activeApp = .sandboxes }
-                                }
-                                dockIcon(title: "Settings", icon: "gearshape", showLabel: dockHovering) {
+                                dockIcon(title: "Settings", icon: "gearshape", showLabel: true) {
                                     withAnimation(.easeIn(duration: 0.15)) { model.activeApp = .settings }
                                 }
                             }
@@ -1787,7 +1797,6 @@ struct ContentView: View {
     private func activeAppTitle(_ app: AppModel.ActiveApp) -> String {
         switch app {
         case .devices: return "Phones"
-        case .sandboxes: return "Sandboxes"
         case .settings: return "Settings"
         case .screen: return model.activeDeviceName.isEmpty ? "Screen" : model.activeDeviceName
         }
@@ -1798,8 +1807,6 @@ struct ContentView: View {
         switch app {
         case .devices:
             DevicesAppView(model: model, showCreateSheet: $showCreateSheet)
-        case .sandboxes:
-            SandboxesAppView(model: model)
         case .settings:
             SettingsAppView(model: model)
         case .screen:
@@ -1968,19 +1975,27 @@ struct DevicesAppView: View {
                     .liquidGlassBackground(cornerRadius: 8, customBorderColor: isRunning ? Color.androidGreen.opacity(0.4) : Color.white.opacity(0.1))
                 }
             }
+
+            // Profiles (Android users) live inside the running phone, so they
+            // ride here as a section of it, not a place of their own.
+            if model.activeSerial != nil {
+                Divider().background(Color.white.opacity(0.1)).padding(.vertical, 4)
+                ProfilesSection(model: model)
+            }
         }
     }
 }
 
-// APP VIEW 2: Sandboxes app
-struct SandboxesAppView: View {
+// Profiles — the Android users of the running phone, shown as a section inside
+// the Phones surface (folded in from the old standalone "Sandboxes" place).
+struct ProfilesSection: View {
     @ObservedObject var model: AppModel
     @State private var newIdentityName = ""
-    
+
     var body: some View {
         VStack(spacing: 16) {
             HStack {
-                Text("Identity Sandboxes")
+                Text("Profiles")
                     .font(.subheadline).bold()
                 Spacer()
                 Button {
@@ -1990,13 +2005,13 @@ struct SandboxesAppView: View {
                 }
                 .buttonStyle(.plain)
             }
-            
+
             if model.identities.isEmpty {
-                Text("Identities live inside a running phone.\nLaunch one from Phones first.")
+                Text("This phone has just its owner profile so far.")
                     .font(.caption)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(Color.slateTextDim)
-                    .padding(.vertical, 30)
+                    .padding(.vertical, 12)
             } else {
                 ForEach(model.identities) { user in
                     HStack {
@@ -2064,7 +2079,7 @@ struct SandboxesAppView: View {
                 
                 // Add identity inline form
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Add New Identity")
+                    Text("Add a profile")
                         .font(.caption).bold()
                     HStack(spacing: 8) {
                         TextField("Name (e.g. work, creator)", text: $newIdentityName)
