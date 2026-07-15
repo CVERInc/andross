@@ -1784,6 +1784,7 @@ struct ContentView: View {
     // The shared instance — the app delegate routes Finder-opened APKs here.
     @StateObject private var model = AppModel.shared
     @State private var showCreateSheet = false
+    @State private var showAdvancedCreate = false
     @State private var dockHovering = false
     var body: some View {
         ZStack {
@@ -2043,25 +2044,31 @@ struct ContentView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 260)
 
-                Picker("System", selection: $model.newType) {
-                    Text("Google Play — Play Store built in").tag(1)
-                    Text("Open source — apps via Aurora Store").tag(2)
-                    Text("Blank — install apps yourself").tag(3)
-                }
-                .frame(width: 260)
-
-                Picker("Size", selection: $model.newProfile) {
-                    Text("Phone (Portrait)").tag(1)
-                    Text("Phone (Landscape)").tag(2)
-                    Text("Tablet (Portrait)").tag(3)
-                    Text("Tablet (Landscape)").tag(4)
-                }
-                .frame(width: 260)
-
-                Picker("Android", selection: $model.newAPILevel) {
-                    ForEach(EmulatorManager.supportedAPILevels, id: \.self) { level in
-                        Text(AppCatalog.androidVersionName(apiLevel: level)).tag(level)
+                // One-tap by default: a name is all it takes — sensible
+                // defaults (Google Play, phone portrait, Android \(EmulatorManager.defaultAPILevel))
+                // handle the rest. Everything tweakable hides in Advanced.
+                DisclosureGroup(isExpanded: $showAdvancedCreate) {
+                    VStack(spacing: 12) {
+                        Picker("System", selection: $model.newType) {
+                            Text("Google Play — Play Store built in").tag(1)
+                            Text("Open source — apps via Aurora Store").tag(2)
+                            Text("Blank — install apps yourself").tag(3)
+                        }
+                        Picker("Size", selection: $model.newProfile) {
+                            Text("Phone (Portrait)").tag(1)
+                            Text("Phone (Landscape)").tag(2)
+                            Text("Tablet (Portrait)").tag(3)
+                            Text("Tablet (Landscape)").tag(4)
+                        }
+                        Picker("Android", selection: $model.newAPILevel) {
+                            ForEach(EmulatorManager.supportedAPILevels, id: \.self) { level in
+                                Text(AppCatalog.androidVersionName(apiLevel: level)).tag(level)
+                            }
+                        }
                     }
+                    .padding(.top, 8)
+                } label: {
+                    Text("Advanced").font(.callout).foregroundStyle(Color.slateTextDim)
                 }
                 .frame(width: 260)
 
@@ -2075,12 +2082,14 @@ struct ContentView: View {
                 HStack(spacing: 12) {
                     Button("Cancel") {
                         showCreateSheet = false
+                        showAdvancedCreate = false
                         model.newName = ""
                     }
                     .buttonStyle(.borderless)
 
                     Button("Create") {
                         showCreateSheet = false
+                        showAdvancedCreate = false
                         model.createNewPhone()
                     }
                     .buttonStyle(.borderedProminent)
@@ -2228,26 +2237,50 @@ struct DevicesAppView: View {
                 Text("Phones")
                     .font(.subheadline).bold()
                 Spacer()
-                Button {
-                    showCreateSheet = true
-                } label: {
-                    Label("Add", systemImage: "plus")
+                // With no phones the hello card carries the call to action, so
+                // the header stays clean and there's only one place to create.
+                if !model.avds.isEmpty {
+                    Button {
+                        showCreateSheet = true
+                    } label: {
+                        Label("Add", systemImage: "plus")
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.androidGreen)
+                    .controlSize(.small)
                 }
-                .buttonStyle(.bordered)
-                .tint(.androidGreen)
-                .controlSize(.small)
             }
-            
+
             if model.avds.isEmpty {
-                VStack(spacing: 8) {
-                    Text("No phones yet.")
-                        .font(.caption)
-                        .foregroundStyle(Color.slateTextDim)
-                    Text("Click Add to create your first one — andross fetches everything it needs.")
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color.slateTextDim)
+                VStack(spacing: 14) {
+                    Image(systemName: "iphone.gen3")
+                        .font(.system(size: 46, weight: .thin))
+                        .foregroundStyle(Color.androidGreen)
+                    VStack(spacing: 5) {
+                        Text("Run Android on your Mac")
+                            .font(.headline).foregroundStyle(.white)
+                        Text("andross gives you a real Android phone in a window — create one and it lives right here.")
+                            .font(.callout)
+                            .foregroundStyle(Color.slateTextDim)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Button {
+                        showCreateSheet = true
+                    } label: {
+                        Label("Create your first phone", systemImage: "plus")
+                            .font(.callout).bold()
+                            .padding(.horizontal, 8).padding(.vertical, 2)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.androidGreen)
+                    .controlSize(.large)
+                    Text("It downloads what it needs the first time — about 3 GB.")
+                        .font(.caption).foregroundStyle(Color.slateTextDim)
                 }
-                .padding(.vertical, 30)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 28)
+                .padding(.horizontal, 12)
             } else {
                 ForEach(model.avds, id: \.self) { name in
                     let isRunning = model.runningAVDNames.contains(name)
