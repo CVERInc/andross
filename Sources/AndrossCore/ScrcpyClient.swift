@@ -60,6 +60,15 @@ public final class ScrcpyClient: @unchecked Sendable {
     private var controlSocketFD: Int32 = -1
     private var forwardedPort: Int?
 
+    /// Every control-socket write goes through this one serial queue. Touch
+    /// events arrive as a rapid down→move→…→up burst, and the device's gesture
+    /// and velocity tracking only make sense if it reads them in that exact
+    /// order; a serial queue guarantees it, and also stops two writes
+    /// interleaving mid-message on the shared fd. (The old path fired each event
+    /// on its own `Task.detached`, which guaranteed neither — edge swipes like
+    /// the pull-down shade and the home-bar-up gesture were the casualties.)
+    private let controlQueue = DispatchQueue(label: "com.cver.andross.scrcpy.control", qos: .userInteractive)
+
     public private(set) var deviceName: String?
 
     public init(serial: String) {
@@ -346,42 +355,43 @@ public final class ScrcpyClient: @unchecked Sendable {
         return buffer
     }
 
-    // MARK: - Control messages (fire-and-forget writes)
+    // MARK: - Control messages (fire-and-forget, serialised writes)
 
-    @discardableResult
-    private func sendControl(_ bytes: [UInt8]) -> Bool {
-        guard controlSocketFD >= 0 else { return false }
-        var offset = 0
-        return bytes.withUnsafeBytes { ptr -> Bool in
-            while offset < bytes.count {
-                let n = Darwin.write(controlSocketFD, ptr.baseAddress!.advanced(by: offset), bytes.count - offset)
-                guard n > 0 else { return false }
-                offset += n
+    /// Enqueue a control message. Returns immediately; the actual socket write
+    /// runs on `controlQueue`, so callers never block the UI thread and — more
+    /// importantly — a burst of events keeps the order it was enqueued in (see
+    /// `controlQueue`). Enqueue from one thread (the main actor, as the input
+    /// handlers do) and the device sees the events in exactly that order.
+    private func sendControl(_ bytes: [UInt8]) {
+        controlQueue.async { [weak self] in
+            guard let self, self.controlSocketFD >= 0 else { return }
+            var offset = 0
+            bytes.withUnsafeBytes { ptr in
+                while offset < bytes.count {
+                    let n = Darwin.write(self.controlSocketFD, ptr.baseAddress!.advanced(by: offset), bytes.count - offset)
+                    guard n > 0 else { return }
+                    offset += n
+                }
             }
-            return true
         }
     }
 
-    @discardableResult
-    public func sendTouch(action: ScrcpyControl.TouchAction, x: Int32, y: Int32, screenWidth: UInt16, screenHeight: UInt16, pressure: Float = 1.0) -> Bool {
+    public func sendTouch(action: ScrcpyControl.TouchAction, x: Int32, y: Int32, screenWidth: UInt16, screenHeight: UInt16, pressure: Float = 1.0) {
         sendControl(ScrcpyControl.touchEvent(action: action, x: x, y: y, screenWidth: screenWidth, screenHeight: screenHeight, pressure: pressure))
     }
 
-    @discardableResult
-    public func sendKeycode(action: ScrcpyControl.KeyAction, keycode: Int32) -> Bool {
+    public func sendKeycode(action: ScrcpyControl.KeyAction, keycode: Int32) {
         sendControl(ScrcpyControl.keycodeEvent(action: action, keycode: keycode))
     }
 
     /// Type `text` on the phone. Picks the wire path that can actually carry it
     /// (see `ScrcpyControl.textInjection`) — callers don't need to know that
     /// Android can't key-event its way to a CJK character.
-    @discardableResult
-    public func sendText(_ text: String) -> Bool {
+    public func sendText(_ text: String) {
         sendControl(ScrcpyControl.textInjection(text))
     }
 
-    @discardableResult
-    public func sendBackOrScreenOn(action: ScrcpyControl.KeyAction) -> Bool {
+    public func sendBackOrScreenOn(action: ScrcpyControl.KeyAction) {
         sendControl(ScrcpyControl.backOrScreenOn(action: action))
     }
 
@@ -395,8 +405,7 @@ public final class ScrcpyClient: @unchecked Sendable {
     /// by injecting a finger instead, which works in both directions and in apps
     /// that ignore a wheel entirely. Kept for protocol completeness, and because
     /// a real handset may well honour it.
-    @discardableResult
-    public func sendScroll(x: Int32, y: Int32, screenWidth: UInt16, screenHeight: UInt16, hScroll: Float, vScroll: Float) -> Bool {
+    public func sendScroll(x: Int32, y: Int32, screenWidth: UInt16, screenHeight: UInt16, hScroll: Float, vScroll: Float) {
         sendControl(ScrcpyControl.scrollEvent(x: x, y: y, screenWidth: screenWidth, screenHeight: screenHeight, hScroll: hScroll, vScroll: vScroll))
     }
 

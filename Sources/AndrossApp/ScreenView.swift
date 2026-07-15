@@ -269,10 +269,12 @@ struct ScreenAppView: View {
         guard let device = devicePoint(viewPoint, fitted: fitted, devicePixels: devicePixels) else { return }
         let width = UInt16(clamping: Int(devicePixels.width))
         let height = UInt16(clamping: Int(devicePixels.height))
-        Task.detached(priority: .userInitiated) {
-            _ = client.sendTouch(action: action, x: Int32(device.x), y: Int32(device.y),
-                                 screenWidth: width, screenHeight: height)
-        }
+        // Called straight, not on a detached task: the down→move→…→up burst has
+        // to reach the control socket in this exact order or edge swipes fall
+        // apart (see ScrcpyClient.controlQueue). The client's own write is async,
+        // so this only enqueues — the main thread isn't blocked.
+        client.sendTouch(action: action, x: Int32(device.x), y: Int32(device.y),
+                         screenWidth: width, screenHeight: height)
     }
 
     /// Wheel/trackpad scroll → a finger dragging on the phone.
@@ -325,17 +327,13 @@ struct ScreenAppView: View {
 
     private func sendText(_ text: String) {
         guard let client else { return }
-        Task.detached(priority: .userInitiated) {
-            _ = client.sendText(text)
-        }
+        client.sendText(text)
     }
 
     private func sendKeycode(_ keycode: Int) {
         guard let client else { return }
-        Task.detached(priority: .userInitiated) {
-            _ = client.sendKeycode(action: .down, keycode: Int32(keycode))
-            _ = client.sendKeycode(action: .up, keycode: Int32(keycode))
-        }
+        client.sendKeycode(action: .down, keycode: Int32(keycode))
+        client.sendKeycode(action: .up, keycode: Int32(keycode))
     }
 
     // MARK: - Streaming lifecycle
