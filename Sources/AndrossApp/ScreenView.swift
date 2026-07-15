@@ -43,6 +43,14 @@ private struct ScreenInteraction: NSViewRepresentable {
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
         override func mouseDown(with event: NSEvent) {
+            // ⌘-drag anywhere moves the window — the hidden fallback for a
+            // borderless window whose only visible handle (the island) now
+            // stays out of the mouse's way. Hand the event to AppKit's own
+            // drag loop and send no touch.
+            if event.modifierFlags.contains(.command) {
+                window?.performDrag(with: event)
+                return
+            }
             window?.makeFirstResponder(self)
             tracking = true
             onDown?(convert(event.locationInWindow, from: nil), bounds.size)
@@ -197,12 +205,8 @@ struct ScreenAppView: View {
                     .aspectRatio(screenAspect, contentMode: .fit)
                     .clipShape(RoundedRectangle(cornerRadius: Self.screenCornerRadius, style: .continuous))
                     .overlay(
-                        // The edge goes green in touch mode: a quiet "safe mode"
-                        // tell that the window won't drag and every press is now
-                        // a finger on the phone.
                         RoundedRectangle(cornerRadius: Self.screenCornerRadius, style: .continuous)
-                            .stroke(model.touchMode ? Color.androidGreen.opacity(0.9) : Color.white.opacity(0.1),
-                                    lineWidth: model.touchMode ? 2 : 1)
+                            .stroke(Color.white.opacity(0.1), lineWidth: 1)
                     )
                 } else if let posterImage {
                     // Degraded fallback: scrcpy failed to start (bad/missing

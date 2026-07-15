@@ -159,13 +159,18 @@ final class AppModel: ObservableObject {
         didSet { UserDefaults.standard.set(rememberWindowPosition, forKey: "rememberWindowPosition") }
     }
     
-    @Published var activeApp: ActiveApp? = nil
+    @Published var activeApp: ActiveApp? = nil {
+        // Leaving the screen drops any lingering bloom so re-entering starts as
+        // the bare notch, never a bar already laid over the phone's status row.
+        didSet { if activeApp != .screen && islandExpanded { islandExpanded = false } }
+    }
 
-    /// Touch mode: while on, the island stops grabbing the mouse so a press-drag
-    /// on the streamed screen reaches the touch layer even at the very top edge —
-    /// the notch otherwise eats exactly the grab you need to pull the shade down.
-    /// Transient (not persisted); it only means anything while the screen is up.
-    @Published var touchMode = false
+    /// The island's bloom, driven from `ChipHostView`'s tracking area rather
+    /// than a SwiftUI hover: idle, the host hit-tests through the island (every
+    /// press a finger on the phone), so `.onHover` never fires. Dwelling on the
+    /// notch sets this true and the island morphs into the Mac's bar. Home keeps
+    /// its bar open regardless via `alwaysExpanded`. See the spec doc.
+    @Published var islandExpanded = false
 
     /// The size/rotation picker anchored to the green light. Lives on the model
     /// because the green light and the menu render in different hosting views.
@@ -834,6 +839,108 @@ private class CustomGlassView: NSVisualEffectView {
 /// controls on the right, rendered directly on the glass, visible only
 /// while `chromeHovering`. No pill backdrop: the dots sit straight on the
 /// glass, matching the old always-on borderless look, just hover-gated.
+/// The chip bar's AppKit host, subclassed so the island's morph can *be* the
+/// mode switch (docs/SPEC-touch-first-island.md).
+///
+/// Idle on the phone screen it hit-tests to nil — every press falls straight
+/// through to the streamed screen's touch layer, top edge and dead centre
+/// included, so the phone gets the finger and the shade pulls from anywhere.
+/// Dwelling the cursor on the notch (~150ms, no button down) blooms the island
+/// into the Mac's status bar, at which point it hit-tests normally: drag the
+/// bar to move the window, click its controls. Leaving the strip collapses it.
+///
+/// Hover can't ride SwiftUI's `.onHover` (that respects hit-testing, which idle
+/// turns off), so the dwell is read from tracking areas — they're geometry-based
+/// and fire regardless of what hitTest returns.
+private final class ChipHostView: NSHostingView<ChipBarView> {
+    private var notchTracking: NSTrackingArea?
+    private var stripTracking: NSTrackingArea?
+    private var dwell: DispatchWorkItem?
+
+    private static let dwellDelay: TimeInterval = 0.15
+    private let notchWidth: CGFloat = 90
+    private let notchHeight: CGFloat = 26
+    private let notchTopPad: CGFloat = 18
+    private let notchSlop: CGFloat = 6
+
+    required init(rootView: ChipBarView) { super.init(rootView: rootView) }
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    // Idle on the screen the whole island is transparent to the mouse and the
+    // press reaches the touch layer below; home, or once bloomed, it's live.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let model = AppModel.shared
+        if model.activeApp == .screen && !model.islandExpanded { return nil }
+        return super.hitTest(point)
+    }
+
+    /// The notch's rect in this view's coordinates, measured from the top edge
+    /// so it holds whichever way `isFlipped` points.
+    private var notchRect: CGRect {
+        let x = (bounds.width - notchWidth) / 2
+        let minY = isFlipped ? notchTopPad : (bounds.height - notchTopPad - notchHeight)
+        return CGRect(x: x, y: minY, width: notchWidth, height: notchHeight)
+            .insetBy(dx: -notchSlop, dy: -notchSlop)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let notchTracking { removeTrackingArea(notchTracking) }
+        if let stripTracking { removeTrackingArea(stripTracking) }
+        // Strip: the whole 64pt host; leaving it collapses the bloom. Notch: the
+        // fixed sub-rect whose dwell opens it. Enter/exit only — no continuous
+        // mouseMoved, so no dependence on the window accepting moved events.
+        let strip = NSTrackingArea(rect: bounds,
+                                   options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                   owner: self, userInfo: ["zone": "strip"])
+        let notch = NSTrackingArea(rect: notchRect,
+                                   options: [.mouseEnteredAndExited, .activeAlways],
+                                   owner: self, userInfo: ["zone": "notch"])
+        addTrackingArea(strip); stripTracking = strip
+        addTrackingArea(notch); notchTracking = notch
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        guard zone(of: event) == "notch",
+              AppModel.shared.activeApp == .screen,   // home stays open on its own
+              NSEvent.pressedMouseButtons == 0        // not mid press-drag
+        else { return }
+        scheduleBloom()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        switch zone(of: event) {
+        case "notch": dwell?.cancel(); dwell = nil    // left before it bloomed
+        case "strip": collapse()                      // left the whole strip
+        default: break
+        }
+    }
+
+    private func zone(of event: NSEvent) -> String? {
+        event.trackingArea?.userInfo?["zone"] as? String
+    }
+
+    private func scheduleBloom() {
+        dwell?.cancel()
+        let item = DispatchWorkItem {
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                AppModel.shared.islandExpanded = true
+            }
+        }
+        dwell = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.dwellDelay, execute: item)
+    }
+
+    private func collapse() {
+        dwell?.cancel(); dwell = nil
+        guard AppModel.shared.islandExpanded else { return }
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+            AppModel.shared.islandExpanded = false
+        }
+    }
+}
+
 /// The home screen's notch — the shared `Island` with the home controls on the
 /// right (the screen toggle and pop-out, only while a phone is running). Idle it
 /// stands in for the old "andross" wordmark; the phone screen wears the very
@@ -909,19 +1016,6 @@ private struct ChipBarView: View {
             .accessibilityLabel(model.audioMuted ? "Unmute Phone Audio" : "Mute Phone Audio")
 
             navKey(icon: "chevron.backward", key: .back, label: "Back")
-
-            Button {
-                withAnimation(.easeOut(duration: 0.15)) { model.touchMode.toggle() }
-            } label: {
-                Image(systemName: model.touchMode ? "hand.tap.fill" : "hand.tap")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(model.touchMode ? Color.androidGreen : Color.white.opacity(0.85))
-                    .frame(width: 20, height: 20)
-            }
-            .buttonStyle(.plain)
-            .help(model.touchMode ? "Exit Touch Mode — window is draggable again"
-                                  : "Touch Mode — drag the phone directly (window won't move)")
-            .accessibilityLabel("Touch Mode")
 
             Button {
                 withAnimation(.easeOut(duration: 0.15)) { model.activeApp = nil }
@@ -1188,7 +1282,7 @@ class ConfiguratorNSView: NSView {
         // Chip bar (traffic lights + window controls), overlaid on the top
         // strip of the glass — on top of the regular SwiftUI content,
         // exactly where the old hand-drawn dots used to sit.
-        let chipHost = NSHostingView(rootView: ChipBarView())
+        let chipHost = ChipHostView(rootView: ChipBarView())
         chipHost.sizingOptions = []
         glassView.addSubview(chipHost)
         chipHost.translatesAutoresizingMaskIntoConstraints = false

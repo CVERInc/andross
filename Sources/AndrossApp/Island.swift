@@ -28,54 +28,36 @@ struct Island<Trailing: View>: View {
     /// screen/pop-out toggles on the home screen, nothing when idle at home.
     @ViewBuilder var trailing: () -> Trailing
 
-    @State private var hovering = false
     @State private var dragOrigin: CGPoint?
     @State private var dragMouseStart: CGPoint?
 
     private let idleWidth: CGFloat = 90
     private let idleHeight: CGFloat = 26
 
-    /// Touch mode (phone screen only): the island stops grabbing the mouse so a
-    /// press-drag reaches the streamed screen's touch layer even at the very top
-    /// edge — the notch otherwise eats exactly the grab you need to pull the
-    /// shade. The bar still shows so its controls (the way back out included)
-    /// stay live; only its drag-fill goes transparent to the press.
-    private var touchMode: Bool { model.touchMode && model.activeApp == .screen }
-
-    /// Held open in touch mode so the controls — and the toggle back out —
-    /// never hide behind a notch you can no longer summon.
-    private var expanded: Bool { alwaysExpanded || hovering || touchMode }
+    /// The morph *is* the mode switch (see docs/SPEC-touch-first-island.md).
+    /// Idle, the island is the phone's — pure visual, the chip host hit-tests
+    /// through it so every press is a finger on the screen. Dwelling the cursor
+    /// on the notch blooms it into the Mac's bar (window drag + controls); that
+    /// bloom is driven from `ChipHostView`'s tracking area, not a SwiftUI hover,
+    /// because idle hit-testing is off and `.onHover` rides hit-testing.
+    private var expanded: Bool { alwaysExpanded || model.islandExpanded }
 
     var body: some View {
         ZStack(alignment: .top) {
             if expanded {
-                // While open the whole bar holds it open, and leaving it (down
-                // into the screen) closes it. The bar covers the phone's status
-                // bar, which is fine because it's now here on purpose.
+                // The Mac's form. Dwelling on the notch (or, at home, always)
+                // blooms this bar; the whole strip holds it open and leaving it
+                // collapses it — both edges owned by ChipHostView's tracking so
+                // the notch→bar hand-off can't flicker.
                 expandedBar
-                    .onHover { inside in
-                        guard !alwaysExpanded else { return }
-                        setHovering(inside)
-                    }
             } else {
-                // Only the notch opens the bar — never the full width. Hovering
-                // the sides, where the phone draws its own clock and battery,
-                // must leave those reachable rather than summon a bar on top of
-                // the very thing you reached for. Opening only; the expanded bar
-                // owns closing, so the notch→bar hand-off can't flicker.
+                // The phone's form: a bare notch, pure decoration. The chip host
+                // hit-tests straight through it, so a press here is a finger on
+                // the phone — it carries no gesture of its own.
                 idleNotch
-                    .onHover { inside in
-                        if inside { setHovering(true) }
-                    }
             }
         }
         .frame(maxWidth: .infinity, alignment: .top)
-    }
-
-    private func setHovering(_ value: Bool) {
-        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
-            hovering = value
-        }
     }
 
     /// Drag the whole window by the island. A real AppKit drag area
@@ -110,8 +92,10 @@ struct Island<Trailing: View>: View {
     private var idleNotch: some View {
         Capsule().fill(Color.black)
             .frame(width: idleWidth, height: idleHeight)
-            .contentShape(Capsule())
-            .gesture(windowDrag)
+            // No gesture and no contentShape: idle, the chip host hit-tests
+            // through the whole island, so this notch is decoration the press
+            // passes clean through to reach the phone underneath.
+            .allowsHitTesting(false)
             // Sits vertically centred on the phone's own status-bar row — the
             // notch reads as part of that row, level with the clock and the
             // battery, not floating above them.
@@ -129,14 +113,13 @@ struct Island<Trailing: View>: View {
         // the window. The wordmark opts out of hit-testing so it can't shadow
         // the drag.
         ZStack {
-            // In touch mode the fill hands the press straight through to the
-            // screen's touch layer beneath, so a drag started on the bar pulls
-            // the shade instead of moving the window; the controls above keep
-            // their own hit-testing and stay tappable.
+            // Bloomed, the fill is the Mac's drag handle again: a press on the
+            // black moves the window, a press on a button lands on the button.
+            // (Only reachable while expanded — idle, the host hit-tests through
+            // the whole island, so this never steals a press from the phone.)
             Rectangle().fill(Color.black)
                 .contentShape(Rectangle())
                 .gesture(windowDrag)
-                .allowsHitTesting(!touchMode)
             HStack(spacing: 0) {
                 lights
                 Spacer(minLength: 24)
