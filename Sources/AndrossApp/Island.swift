@@ -92,10 +92,10 @@ struct Island<Trailing: View>: View {
             .frame(width: idleWidth, height: idleHeight)
             .background(WindowDragArea())
             .background(Capsule().fill(Color.black).allowsHitTesting(false))
-            // Dropped so the pill sits vertically centred on the phone's own
-            // status-bar row — the notch reads as part of that row, level with
-            // the clock and the battery, not floating above them.
-            .padding(.top, 20)
+            // Sits vertically centred on the phone's own status-bar row — the
+            // notch reads as part of that row, level with the clock and the
+            // battery, not floating above them.
+            .padding(.top, 18)
     }
 
     /// The expanded status bar: full width, flush to the top, square corners.
