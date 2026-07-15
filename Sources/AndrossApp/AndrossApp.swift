@@ -158,6 +158,12 @@ final class AppModel: ObservableObject {
     @Published var newType = 1 // 1: Play Store, 2: AOSP+Aurora, 3: Blank AOSP
     @Published var newProfile = 1 // 1: Phone Portrait, 2: Phone Landscape, 3: Tablet Portrait, 4: Tablet Landscape
     @Published var newAPILevel = EmulatorManager.defaultAPILevel
+
+    // Create-time disk awareness: which system images are already downloaded
+    // (so we can say "Installed" vs "Downloads ~3 GB"), and how much room is
+    // left. Refreshed when the create sheet appears.
+    @Published var installedImageLevels: Set<Int> = []
+    @Published var freeDiskBytes: Int64 = .max
     
     // Clean uninstallation configuration. Destructive boxes start unchecked —
     // an uninstall panel shouldn't sit pre-armed to erase every phone.
@@ -598,7 +604,7 @@ final class AppModel: ObservableObject {
         // readable number instead of a silent, windowless non-start.
         let free = EmulatorManager.shared.availableDiskBytes()
         if free < EmulatorManager.minBootFreeBytes {
-            presentDiskShortage(free: free)
+            presentDiskShortage(action: "Starting a phone", needed: EmulatorManager.minBootFreeBytes, free: free)
             return
         }
 
@@ -910,12 +916,24 @@ final class AppModel: ObservableObject {
         // the tools (avdmanager only accepts [a-zA-Z0-9._-]).
         let id = uniqueAVDID(from: displayName)
 
-        progressMessage = "Creating phone [\(displayName)]…"
-        isCreating = true
-
         let typeVal = newType
         let profileVal = newProfile
         let apiVal = newAPILevel
+
+        // Space preflight: a fresh version pulls a ~3 GB image; an already-
+        // installed one just needs boot headroom. Refuse up front with real
+        // numbers rather than failing deep inside the download.
+        let type = EmulatorManager.SystemType(rawValue: typeVal) ?? .googlePlay
+        let needsDownload = !EmulatorManager.shared.installedImageAPILevels(type: type).contains(apiVal)
+        let required = needsDownload ? EmulatorManager.approxSystemImageBytes : EmulatorManager.minBootFreeBytes
+        let free = EmulatorManager.shared.availableDiskBytes()
+        if free < required {
+            presentDiskShortage(action: "Creating this phone", needed: required, free: free)
+            return
+        }
+
+        progressMessage = "Creating phone [\(displayName)]…"
+        isCreating = true
 
         Task.detached(priority: .userInitiated) {
             let type = EmulatorManager.SystemType(rawValue: typeVal) ?? .googlePlay
@@ -935,6 +953,22 @@ final class AppModel: ObservableObject {
                 } else {
                     self.presentCreateFailure(displayName: displayName)
                 }
+            }
+        }
+    }
+
+    /// Refresh what the create sheet needs to talk about space: which images
+    /// are already downloaded and how much room is left. Cheap filesystem
+    /// stats, hopped off the main thread.
+    func refreshCreatePreflight() {
+        let typeVal = newType
+        Task.detached(priority: .userInitiated) {
+            let type = EmulatorManager.SystemType(rawValue: typeVal) ?? .googlePlay
+            let installed = EmulatorManager.shared.installedImageAPILevels(type: type)
+            let free = EmulatorManager.shared.availableDiskBytes()
+            await MainActor.run {
+                self.installedImageLevels = installed
+                self.freeDiskBytes = free
             }
         }
     }
@@ -975,12 +1009,13 @@ final class AppModel: ObservableObject {
         alert.runModal()
     }
 
-    /// Refuse a boot we know the emulator would reject for space, with the real
-    /// number and where to look — rather than letting it FATAL windowlessly.
-    private func presentDiskShortage(free: Int64) {
+    /// Refuse an action we know would run out of space, with the real numbers
+    /// and where to look — rather than letting the emulator FATAL windowlessly
+    /// or a half-finished download fail deep in the process.
+    private func presentDiskShortage(action: String, needed: Int64, free: Int64) {
         let alert = NSAlert()
-        alert.messageText = "Not enough free space to start the phone"
-        alert.informativeText = "Starting a phone needs about 2 GB free, but this Mac has \(humanBytes(free)) left. Free some space — Storage shows what andross is using — then try again."
+        alert.messageText = "Not enough free space"
+        alert.informativeText = "\(action) needs about \(humanBytes(needed)) free, but this Mac has \(humanBytes(free)) left. Free some space — Storage shows what andross is using — then try again."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "OK")
         alert.runModal()
@@ -1981,14 +2016,21 @@ struct ContentView: View {
                     }
                 }
                 .frame(width: 260)
-                
+
+                // What creating this will cost in space, and whether there's
+                // room — shown before the download starts, not after it fails.
+                Label(createSpaceHint, systemImage: createSpaceTight ? "exclamationmark.triangle.fill" : "internaldrive")
+                    .font(.caption)
+                    .foregroundStyle(createSpaceTight ? Color.slateRed : Color.slateTextDim)
+                    .frame(width: 260, alignment: .leading)
+
                 HStack(spacing: 12) {
                     Button("Cancel") {
                         showCreateSheet = false
                         model.newName = ""
                     }
                     .buttonStyle(.borderless)
-                    
+
                     Button("Create") {
                         showCreateSheet = false
                         model.createNewPhone()
@@ -2000,8 +2042,33 @@ struct ContentView: View {
             }
             .padding(20)
             .frame(width: 300)
+            .onAppear { model.refreshCreatePreflight() }
+            .onChange(of: model.newType) { _ in model.refreshCreatePreflight() }
         }
         .background(Color.clear)
+    }
+
+    /// The chosen Android version's image isn't on disk yet — creating it pulls
+    /// a multi-GB download.
+    private var createNeedsDownload: Bool {
+        !model.installedImageLevels.contains(model.newAPILevel)
+    }
+
+    /// One line on what creating this phone costs and whether there's room.
+    private var createSpaceHint: String {
+        let free = model.freeDiskBytes == .max ? "" : " · \(humanBytes(model.freeDiskBytes)) free"
+        return createNeedsDownload
+            ? "Downloads about 3 GB the first time\(free)"
+            : "Already downloaded\(free)"
+    }
+
+    /// True when free space is below what this create would need — the hint
+    /// turns red and Create will refuse with the real numbers.
+    private var createSpaceTight: Bool {
+        let required = createNeedsDownload
+            ? EmulatorManager.approxSystemImageBytes
+            : EmulatorManager.minBootFreeBytes
+        return model.freeDiskBytes < required
     }
     
     private func activeAppTitle(_ app: AppModel.ActiveApp) -> String {

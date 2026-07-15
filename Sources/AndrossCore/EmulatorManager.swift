@@ -556,6 +556,36 @@ public final class EmulatorManager: Sendable {
     /// boot with real headroom is never blocked, and lean on the launch-failure
     /// surface to catch the narrow margin above it.
     public static let minBootFreeBytes: Int64 = 2 * 1024 * 1024 * 1024
+
+    /// Conservative size of one system-image download. Real images run
+    /// ~2.0–3.3 GB depending on API level; we quote a single upper figure for
+    /// the "you're about to download" hint and the create-time space gate
+    /// rather than pretending to know the exact bytes before asking the SDK.
+    public static let approxSystemImageBytes: Int64 = 3 * 1024 * 1024 * 1024
+
+    /// API levels whose system image (for the given system type) is already on
+    /// disk, so creating that phone won't trigger a multi-GB download. Reads the
+    /// SDK's `system-images/android-<level>/<tag>/arm64-v8a` layout directly.
+    public func installedImageAPILevels(type: SystemType) -> Set<Int> {
+        let tag: String
+        switch type {
+        case .googlePlay: tag = "google_apis_playstore"
+        case .aospWithAurora, .aospBlank: tag = "default"
+        }
+        let base = URL(fileURLWithPath: androidHome).appendingPathComponent("system-images")
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: base.path) else { return [] }
+        var levels = Set<Int>()
+        for entry in entries where entry.hasPrefix("android-") {
+            guard let api = Int(entry.dropFirst("android-".count)) else { continue }
+            let imgDir = base.appendingPathComponent(entry)
+                .appendingPathComponent(tag).appendingPathComponent("arm64-v8a")
+            if let files = try? FileManager.default.contentsOfDirectory(atPath: imgDir.path),
+               !files.isEmpty {
+                levels.insert(api)
+            }
+        }
+        return levels
+    }
 }
 
 /// How a launched emulator turned out. See `awaitLaunchOutcome`.
