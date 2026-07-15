@@ -77,7 +77,7 @@ struct Island<Trailing: View>: View {
             .frame(width: idleWidth, height: idleHeight)
             .background(WindowDragArea())
             .background(Capsule().fill(Color.black).allowsHitTesting(false))
-            .padding(.top, 9)
+            .padding(.top, 15)
     }
 
     /// The expanded status bar: full width, flush to the top, square corners.
@@ -100,8 +100,12 @@ struct Island<Trailing: View>: View {
                 .foregroundColor(.white.opacity(0.9))
                 .allowsHitTesting(false)
         )
-        .padding(.horizontal, 22)
-        .padding(.vertical, 10)
+        // Generous top and side padding so the row clears the window's rounded
+        // corners — the lights shouldn't crowd the arc where the top edge turns
+        // down, and the bar reads as a proper status bar, not a thin strip.
+        .padding(.top, 17)
+        .padding(.bottom, 12)
+        .padding(.horizontal, 32)
         .frame(maxWidth: .infinity)
         // Fill is non-hit-testing so a mouse-down on the empty bar falls through
         // to the drag area behind it; a filled SwiftUI shape otherwise swallows
