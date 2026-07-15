@@ -20,6 +20,7 @@ final class AudioPlayer: @unchecked Sendable {
     private let player = AVAudioPlayerNode()
     private let format: AVAudioFormat
     private var running = false
+    private var muted = false
 
     /// Bytes per interleaved stereo s16 frame: 2 channels × 2 bytes.
     private static let bytesPerFrame = 4
@@ -47,6 +48,7 @@ final class AudioPlayer: @unchecked Sendable {
         engine.connect(player, to: engine.mainMixerNode, format: format)
         do {
             try engine.start()
+            player.volume = muted ? 0 : 1
             player.play()
             running = true
         } catch {
@@ -76,6 +78,15 @@ final class AudioPlayer: @unchecked Sendable {
             }
         }
         player.scheduleBuffer(buffer, completionHandler: nil)
+    }
+
+    /// Mute or unmute without interrupting the stream: the engine keeps pulling
+    /// packets, they just play at zero gain, so there's no buffer to refill and
+    /// no gap when sound comes back. Safe to call from any thread — the island's
+    /// switch flips it on the main actor while packets arrive on the audio task.
+    func setMuted(_ muted: Bool) {
+        self.muted = muted
+        if running { player.volume = muted ? 0 : 1 }
     }
 
     /// Tear the engine down and release the audio device. Safe to call more

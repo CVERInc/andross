@@ -219,6 +219,9 @@ struct ScreenAppView: View {
         .onChange(of: isStreaming) { streaming in
             streaming ? startKeyMonitor() : stopKeyMonitor()
         }
+        .onChange(of: model.audioMuted) { muted in
+            audioPlayer?.setMuted(muted)
+        }
         .onDisappear(perform: stopKeyMonitor)
     }
 
@@ -270,6 +273,20 @@ struct ScreenAppView: View {
     private var island: some View {
         Island {
             HStack(spacing: 8) {
+                // The phone's ring/silent switch, rehoused on the island. Gain-
+                // based, so it silences without cutting the stream.
+                Button {
+                    model.audioMuted.toggle()
+                } label: {
+                    Image(systemName: model.audioMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(model.audioMuted ? Color.slateRed : Color.white.opacity(0.85))
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(.plain)
+                .help(model.audioMuted ? "Unmute Phone Audio" : "Mute Phone Audio")
+                .accessibilityLabel(model.audioMuted ? "Unmute Phone Audio" : "Mute Phone Audio")
+
                 navKey(icon: "chevron.backward", key: .back, label: "Back")
 
                 Button {
@@ -450,6 +467,7 @@ struct ScreenAppView: View {
         // task stops the player itself.
         let audioTask: Task<Void, Never>?
         if let player = AudioPlayer() {
+            player.setMuted(model.audioMuted)
             audioPlayer = player
             audioTask = Task.detached(priority: .userInitiated) {
                 guard let audioStream = newClient.makeAudioStream() else { return }

@@ -165,6 +165,15 @@ final class AppModel: ObservableObject {
     /// because the green light and the menu render in different hosting views.
     @Published var sizeMenuVisible = false
 
+    /// Mutes the streamed phone's audio — the island's stand-in for the ring/
+    /// silent switch. Lives on the model because the island button that flips it
+    /// and the AudioPlayer that honours it are worlds apart; persisted so the
+    /// phone stays as loud or as quiet as you last left it. Applied via the
+    /// player's gain, so muting never interrupts the stream.
+    @Published var audioMuted = UserDefaults.standard.bool(forKey: "audioMuted") {
+        didSet { UserDefaults.standard.set(audioMuted, forKey: "audioMuted") }
+    }
+
     // Default to Phone Portrait on launch
     @Published var isTablet = false
     @Published var isLandscape = false
