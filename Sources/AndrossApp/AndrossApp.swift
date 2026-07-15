@@ -835,44 +835,112 @@ private class CustomGlassView: NSVisualEffectView {
 private struct ChipBarView: View {
     @ObservedObject var model = AppModel.shared
 
-    var body: some View {
-        Island(alwaysExpanded: true) {
-            if model.activeSerial != nil {
-                HStack(spacing: 8) {
-                    Button {
-                        withAnimation(.easeOut(duration: 0.15)) {
-                            if model.activeApp == .screen { model.activeApp = nil }
-                            else { model.openScreen() }
-                        }
-                    } label: {
-                        Image(systemName: model.activeApp == .screen ? "iphone.slash" : "play.display")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(model.activeApp == .screen ? Color.androidGreen : Color.white.opacity(0.85))
-                            .frame(width: 20, height: 20)
-                    }
-                    .buttonStyle(.plain)
-                    .help(model.activeApp == .screen ? "Close Screen View" : "Open Screen View")
+    /// On the phone screen the island collapses to a hoverable notch (so it can
+    /// clear Android's own status bar) carrying the phone's keys; at home it
+    /// stays a full black bar with the home controls. Both live in this one
+    /// top-level host — pinned above the streamed screen's touch layer — which
+    /// is the whole reason the buttons and the window-drag get the mouse at all.
+    /// When the island was a sibling of that touch NSView down in ScreenView's
+    /// SwiftUI tree, the NSView swallowed every click before the island saw it.
+    private var onScreen: Bool { model.activeApp == .screen }
 
-                    Button { model.toggleHeadedHeadless() } label: {
-                        Image(systemName: model.headlessBoot ? "arrow.up.right.square" : "arrow.down.left.square")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(Color.white.opacity(0.85))
-                            .frame(width: 20, height: 20)
-                    }
-                    .buttonStyle(.plain)
-                    .help(model.headlessBoot ? "Pop Out Phone Window" : "Embed Phone Window")
-                }
+    var body: some View {
+        Island(alwaysExpanded: !onScreen) {
+            if onScreen {
+                phoneControls
+            } else if model.activeSerial != nil {
+                homeControls
             }
         }
         .frame(maxWidth: .infinity, alignment: .center)
         .frame(maxHeight: .infinity, alignment: .top)
         // Flush to the window's top edge so the bar reads as the window's own
-        // chrome gone black, its corners meeting the 52pt glass rounding.
-        // Hidden while the phone's screen is up — ScreenView draws its own island
-        // there, and two notches would fight for the same strip.
-        .opacity(model.activeApp == .screen ? 0 : 1)
-        .allowsHitTesting(model.activeApp != .screen)
+        // chrome gone black, its corners meeting the 55pt glass rounding.
         .ignoresSafeArea()
+    }
+
+    /// Home: open/close the embedded screen, pop the phone window in/out.
+    private var homeControls: some View {
+        HStack(spacing: 8) {
+            Button {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    if model.activeApp == .screen { model.activeApp = nil }
+                    else { model.openScreen() }
+                }
+            } label: {
+                Image(systemName: model.activeApp == .screen ? "iphone.slash" : "play.display")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(model.activeApp == .screen ? Color.androidGreen : Color.white.opacity(0.85))
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.plain)
+            .help(model.activeApp == .screen ? "Close Screen View" : "Open Screen View")
+
+            Button { model.toggleHeadedHeadless() } label: {
+                Image(systemName: model.headlessBoot ? "arrow.up.right.square" : "arrow.down.left.square")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Color.white.opacity(0.85))
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.plain)
+            .help(model.headlessBoot ? "Pop Out Phone Window" : "Embed Phone Window")
+        }
+    }
+
+    /// Phone: the ring/silent switch (gain-based mute), Back, Exit, and the
+    /// pop-out toggle. Home and Recents stay off — the shell *is* the launcher,
+    /// so leaving the screen is the ✕, and the phone's own home bar still swipes.
+    private var phoneControls: some View {
+        HStack(spacing: 8) {
+            Button { model.audioMuted.toggle() } label: {
+                Image(systemName: model.audioMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(model.audioMuted ? Color.slateRed : Color.white.opacity(0.85))
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.plain)
+            .help(model.audioMuted ? "Unmute Phone Audio" : "Mute Phone Audio")
+            .accessibilityLabel(model.audioMuted ? "Unmute Phone Audio" : "Mute Phone Audio")
+
+            navKey(icon: "chevron.backward", key: .back, label: "Back")
+
+            Button {
+                withAnimation(.easeOut(duration: 0.15)) { model.activeApp = nil }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Color.slateRed)
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.plain).help("Exit Screen").accessibilityLabel("Exit Screen")
+
+            Button { model.toggleHeadedHeadless() } label: {
+                Image(systemName: model.headlessBoot ? "arrow.up.right.square" : "arrow.down.left.square")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Color.white.opacity(0.85))
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.plain)
+            .help(model.headlessBoot ? "Pop Out Phone Window" : "Embed Phone Window")
+            .accessibilityLabel(model.headlessBoot ? "Pop Out Phone Window" : "Embed Phone Window")
+        }
+    }
+
+    private func navKey(icon: String, key: EmulatorManager.AndroidKey, label: String) -> some View {
+        Button {
+            guard let serial = model.activeSerial else { return }
+            Task.detached(priority: .userInitiated) {
+                _ = EmulatorManager.shared.inputKey(serial: serial, key: key)
+            }
+        } label: {
+            Image(systemName: icon)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.85))
+                .frame(width: 20, height: 20)
+        }
+        .buttonStyle(.plain)
+        .help(label)
+        .accessibilityLabel(label)
     }
 }
 

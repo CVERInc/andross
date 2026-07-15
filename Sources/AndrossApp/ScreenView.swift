@@ -205,13 +205,11 @@ struct ScreenAppView: View {
             }
             .padding(embeddedScreenBezel)
 
-            if model.activeSerial != nil && (isStreaming || posterImage != nil) {
-                // Flush to the top and full width: the expanded bar reaches the
-                // window's edges so its corner mask clips it, and the idle notch
-                // floats itself down from here. No inset, or the square bar would
-                // strand a gap above the window's rounded corners.
-                island
-            }
+            // The phone's notch/status bar isn't drawn here. It rides the
+            // top-level ChipBarView host (see AndrossApp's configureWindow),
+            // which sits *above* this view's touch NSView — the only place its
+            // buttons and window-drag actually receive the mouse. Drawn as a
+            // sibling of the touch layer, the NSView ate every click.
         }
         .task(id: model.activeSerial) {
             await streamScreen()
@@ -261,74 +259,6 @@ struct ScreenAppView: View {
     private func stopKeyMonitor() {
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         keyMonitor = nil
-    }
-
-    /// The phone's notch: the shared `Island` with the phone's own keys on the
-    /// right. Back (a mouse has no edge-swipe worth the name) and Exit; then
-    /// pop-out. Home and Recents are deliberately absent — the shell *is* the
-    /// launcher, so `streamScreen` leaves the screen the moment Android's
-    /// launcher comes forward, which makes Home a long way round to the ✕, and
-    /// Recents summons the multitasker the thin shell exists to hide. The phone's
-    /// own home bar still swipes up to both.
-    private var island: some View {
-        Island {
-            HStack(spacing: 8) {
-                // The phone's ring/silent switch, rehoused on the island. Gain-
-                // based, so it silences without cutting the stream.
-                Button {
-                    model.audioMuted.toggle()
-                } label: {
-                    Image(systemName: model.audioMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(model.audioMuted ? Color.slateRed : Color.white.opacity(0.85))
-                        .frame(width: 20, height: 20)
-                }
-                .buttonStyle(.plain)
-                .help(model.audioMuted ? "Unmute Phone Audio" : "Mute Phone Audio")
-                .accessibilityLabel(model.audioMuted ? "Unmute Phone Audio" : "Mute Phone Audio")
-
-                navKey(icon: "chevron.backward", key: .back, label: "Back")
-
-                Button {
-                    withAnimation(.easeOut(duration: 0.15)) { model.activeApp = nil }
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(Color.slateRed)
-                        .frame(width: 20, height: 20)
-                }
-                .buttonStyle(.plain).help("Exit Screen").accessibilityLabel("Exit Screen")
-
-                Button { model.toggleHeadedHeadless() } label: {
-                    Image(systemName: model.headlessBoot ? "arrow.up.right.square" : "arrow.down.left.square")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(Color.white.opacity(0.85))
-                        .frame(width: 20, height: 20)
-                }
-                .buttonStyle(.plain)
-                .help(model.headlessBoot ? "Pop Out Phone Window" : "Embed Phone Window")
-                .accessibilityLabel(model.headlessBoot ? "Pop Out Phone Window" : "Embed Phone Window")
-            }
-        }
-    }
-
-    private func navKey(icon: String, key: EmulatorManager.AndroidKey, label: String) -> some View {
-        Button {
-            guard let serial = model.activeSerial else { return }
-            Task.detached(priority: .userInitiated) {
-                _ = EmulatorManager.shared.inputKey(serial: serial, key: key)
-            }
-        } label: {
-            // No disc behind the glyph: inside the island's own black pill a
-            // second background would just be a smudge on it.
-            Image(systemName: icon)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(Color.white.opacity(0.85))
-                .frame(width: 20, height: 20)
-        }
-        .buttonStyle(.plain)
-        .help(label)
-        .accessibilityLabel(label)
     }
 
     // MARK: - Input (live, over the scrcpy control socket)

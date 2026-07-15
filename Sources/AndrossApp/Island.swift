@@ -3,22 +3,6 @@ import AppKit
 import AndrossCore
 import Signet
 
-/// A transparent AppKit view that lets a drag begun on it move the window.
-///
-/// The window is borderless and `isMovableByWindowBackground`, so bare
-/// background moves it — but a SwiftUI shape fill counts as content and swallows
-/// the drag, which is why only the bezel moved the window before. Behind the
-/// controls, with the fill marked non-hit-testing above it, this turns the pill
-/// into a grab handle: the buttons sit on top and still click, the empty space
-/// drags the whole window, the way the notch does on a phone.
-struct WindowDragArea: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { DragView() }
-    func updateNSView(_ nsView: NSView, context: Context) {}
-    private final class DragView: NSView {
-        override var mouseDownCanMoveWindow: Bool { true }
-    }
-}
-
 /// The notch — one black element, worn by both the home screen and the phone
 /// screen, so the two read as the same app.
 ///
@@ -45,6 +29,8 @@ struct Island<Trailing: View>: View {
     @ViewBuilder var trailing: () -> Trailing
 
     @State private var hovering = false
+    @State private var dragOrigin: CGPoint?
+    @State private var dragMouseStart: CGPoint?
 
     private let idleWidth: CGFloat = 90
     private let idleHeight: CGFloat = 26
@@ -83,15 +69,40 @@ struct Island<Trailing: View>: View {
         }
     }
 
+    /// Drag the whole window by the island. A real AppKit drag area
+    /// (`mouseDownCanMoveWindow`) never moved the window from here — on the
+    /// phone screen the touch layer sits above and eats the mouse-down before
+    /// AppKit's move-by-background can act. A SwiftUI gesture rides the same
+    /// event path as the buttons, which do work, so it reaches the island
+    /// wherever the buttons do; it just repositions the window itself.
+    private var windowDrag: some Gesture {
+        // The gesture only detects the drag; the offset is measured from the
+        // real cursor via `NSEvent.mouseLocation`, not the gesture translation.
+        // SwiftUI's `.global` space is window-relative, so moving the window
+        // shifts it under the gesture and the two cancel out — the window barely
+        // creeps. Screen coordinates don't move with the window, so it tracks
+        // the cursor exactly. Both are y-up here, so the delta adds directly.
+        DragGesture(minimumDistance: 1)
+            .onChanged { _ in
+                guard let win = model.mainWindow else { return }
+                let mouse = NSEvent.mouseLocation
+                if dragOrigin == nil { dragOrigin = win.frame.origin; dragMouseStart = mouse }
+                guard let origin = dragOrigin, let start = dragMouseStart else { return }
+                win.setFrameOrigin(CGPoint(x: origin.x + (mouse.x - start.x),
+                                           y: origin.y + (mouse.y - start.y)))
+            }
+            .onEnded { _ in dragOrigin = nil; dragMouseStart = nil }
+    }
+
     /// The resting notch: a small black capsule floating just below the top
     /// edge, Dynamic-Island style. This owns its whole vertical offset — the
     /// host places the island flush so the expanded bar can reach the top, and
     /// the notch pads itself down from there.
     private var idleNotch: some View {
-        Color.clear
+        Capsule().fill(Color.black)
             .frame(width: idleWidth, height: idleHeight)
-            .background(WindowDragArea())
-            .background(Capsule().fill(Color.black).allowsHitTesting(false))
+            .contentShape(Capsule())
+            .gesture(windowDrag)
             // Sits vertically centred on the phone's own status-bar row — the
             // notch reads as part of that row, level with the clock and the
             // battery, not floating above them.
@@ -103,33 +114,38 @@ struct Island<Trailing: View>: View {
     /// same mask that rounds the streamed screen's bottom, so the bar's top
     /// corners match the window exactly with nothing to keep in sync by hand.
     private var expandedBar: some View {
-        HStack(spacing: 0) {
-            lights
-            Spacer(minLength: 24)
-            trailing()
+        // Bottom to top: a black fill that carries the window drag, then the
+        // controls. A press on a button lands on the button; a press anywhere
+        // else — the wordmark, the gaps — falls through to the fill and moves
+        // the window. The wordmark opts out of hit-testing so it can't shadow
+        // the drag.
+        ZStack {
+            Rectangle().fill(Color.black)
+                .contentShape(Rectangle())
+                .gesture(windowDrag)
+            HStack(spacing: 0) {
+                lights
+                Spacer(minLength: 24)
+                trailing()
+            }
+            // The wordmark rides the true center, unmoved by whatever controls
+            // sit on the right — back where the phone puts the carrier name, the
+            // spot it lost when the header lost its title bar.
+            .overlay(
+                Text("andross")
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .kerning(0.5)
+                    .foregroundColor(.white.opacity(0.9))
+                    .allowsHitTesting(false)
+            )
+            // Generous top and side padding so the row clears the window's
+            // rounded corners — the lights shouldn't crowd the arc where the top
+            // edge turns down, and it reads as a proper status bar, not a strip.
+            .padding(.top, 17)
+            .padding(.bottom, 12)
+            .padding(.horizontal, 32)
         }
-        // The wordmark rides the true center, unmoved by whatever controls sit
-        // on the right — it's back where the phone puts the carrier name, the
-        // spot it lost when the header lost its title bar.
-        .overlay(
-            Text("andross")
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .kerning(0.5)
-                .foregroundColor(.white.opacity(0.9))
-                .allowsHitTesting(false)
-        )
-        // Generous top and side padding so the row clears the window's rounded
-        // corners — the lights shouldn't crowd the arc where the top edge turns
-        // down, and the bar reads as a proper status bar, not a thin strip.
-        .padding(.top, 17)
-        .padding(.bottom, 12)
-        .padding(.horizontal, 32)
         .frame(maxWidth: .infinity)
-        // Fill is non-hit-testing so a mouse-down on the empty bar falls through
-        // to the drag area behind it; a filled SwiftUI shape otherwise swallows
-        // the event before AppKit's move-by-background sees it.
-        .background(WindowDragArea())
-        .background(Rectangle().fill(Color.black).allowsHitTesting(false))
         .transition(.opacity)
     }
 
