@@ -586,6 +586,87 @@ public final class EmulatorManager: Sendable {
         }
         return levels
     }
+
+    /// Every system image on disk, with its size — what the Storage tile lists
+    /// so unused ones can be reclaimed. Newest API first.
+    public func installedSystemImages() -> [InstalledImage] {
+        let base = URL(fileURLWithPath: androidHome).appendingPathComponent("system-images")
+        guard let androidDirs = try? FileManager.default.contentsOfDirectory(atPath: base.path) else { return [] }
+        var result: [InstalledImage] = []
+        for androidDir in androidDirs where androidDir.hasPrefix("android-") {
+            guard let api = Int(androidDir.dropFirst("android-".count)) else { continue }
+            let apiURL = base.appendingPathComponent(androidDir)
+            guard let tags = try? FileManager.default.contentsOfDirectory(atPath: apiURL.path) else { continue }
+            for tag in tags {
+                let abiURL = apiURL.appendingPathComponent(tag).appendingPathComponent("arm64-v8a")
+                guard let files = try? FileManager.default.contentsOfDirectory(atPath: abiURL.path),
+                      !files.isEmpty else { continue }
+                result.append(InstalledImage(
+                    apiLevel: api,
+                    tag: tag,
+                    sizeBytes: getDirectorySize(path: abiURL.path),
+                    sdkPackage: "system-images;android-\(api);\(tag);arm64-v8a",
+                    sysdirPrefix: "system-images/android-\(api)/\(tag)/arm64-v8a"))
+            }
+        }
+        return result.sorted { $0.apiLevel > $1.apiLevel }
+    }
+
+    /// The `image.sysdir.1` each existing AVD is built on, normalised without a
+    /// trailing slash — so the Storage tile can refuse to remove an image a
+    /// phone still depends on.
+    public func systemImageSysdirsInUse() -> Set<String> {
+        let avdRoot = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".android").appendingPathComponent("avd")
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: avdRoot.path) else { return [] }
+        var used = Set<String>()
+        for entry in entries where entry.hasSuffix(".avd") {
+            let config = avdRoot.appendingPathComponent(entry).appendingPathComponent("config.ini")
+            guard let text = try? String(contentsOf: config, encoding: .utf8) else { continue }
+            for line in text.components(separatedBy: .newlines) where line.hasPrefix("image.sysdir.1=") {
+                let value = String(line.dropFirst("image.sysdir.1=".count))
+                    .trimmingCharacters(in: .whitespaces)
+                let normalised = value.hasSuffix("/") ? String(value.dropLast()) : value
+                if !normalised.isEmpty { used.insert(normalised) }
+                break
+            }
+        }
+        return used
+    }
+
+    /// Remove a system image via sdkmanager, then tidy the now-empty
+    /// `android-<level>` scaffolding it leaves behind. Returns whether the
+    /// uninstall itself succeeded.
+    @discardableResult
+    public func removeSystemImage(_ image: InstalledImage) -> Bool {
+        let result = Shell.run([cmdlineTool("sdkmanager"), "--uninstall", image.sdkPackage])
+        // sdkmanager empties the abi/tag dirs but leaves the android-<level>
+        // husk; rmdir only removes it if genuinely empty, so a second image at
+        // the same level is never disturbed.
+        let base = URL(fileURLWithPath: androidHome).appendingPathComponent("system-images")
+        let apiDir = base.appendingPathComponent("android-\(image.apiLevel)")
+        let tagDir = apiDir.appendingPathComponent(image.tag)
+        for dir in [tagDir, apiDir] {
+            if let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path), files.isEmpty {
+                try? FileManager.default.removeItem(at: dir)
+            }
+        }
+        return result.ok
+    }
+}
+
+/// One Android system image installed on the host — what the Storage tile
+/// lists so unused versions can be reclaimed.
+public struct InstalledImage: Identifiable, Sendable, Equatable {
+    public let apiLevel: Int
+    /// SDK tag, e.g. `google_apis_playstore` or `default`.
+    public let tag: String
+    public let sizeBytes: Int64
+    /// The `system-images;android-N;tag;arm64-v8a` id sdkmanager uninstalls by.
+    public let sdkPackage: String
+    /// The `system-images/android-N/tag/arm64-v8a` path AVDs reference.
+    public let sysdirPrefix: String
+    public var id: String { sdkPackage }
 }
 
 /// How a launched emulator turned out. See `awaitLaunchOutcome`.

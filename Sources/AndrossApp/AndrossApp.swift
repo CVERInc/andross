@@ -124,6 +124,11 @@ final class AppModel: ObservableObject {
     /// every visible surface resolves through here via `displayName(for:)`.
     @Published var avdDisplayNames: [String: String] = [:]
     @Published var selectedAVD: String?
+    /// Installed Android system images (Storage tile), and the sysdir prefixes
+    /// currently in use by an AVD so those can't be reclaimed out from under a
+    /// phone.
+    @Published var systemImages: [InstalledImage] = []
+    @Published var imagesInUse: Set<String> = []
     @Published var logs: [String] = []
     @Published var isCreating = false
     @Published var progressMessage = ""
@@ -366,10 +371,53 @@ final class AppModel: ObservableObject {
         logs = logBuffer.lines
     }
     
+    /// Load the installed system images and which are in use, for the Storage
+    /// tile's reclaim list.
+    func refreshSystemImages() {
+        Task.detached(priority: .userInitiated) {
+            let images = EmulatorManager.shared.installedSystemImages()
+            let inUse = EmulatorManager.shared.systemImageSysdirsInUse()
+            await MainActor.run {
+                self.systemImages = images
+                self.imagesInUse = inUse
+            }
+        }
+    }
+
+    /// Whether a phone still depends on this image (so removal is blocked).
+    func isImageInUse(_ image: InstalledImage) -> Bool {
+        imagesInUse.contains { $0.hasPrefix(image.sysdirPrefix) }
+    }
+
+    /// Reclaim a system image after confirmation. Refuses if a phone still
+    /// needs it; otherwise uninstalls via sdkmanager and refreshes the list.
+    func removeSystemImage(_ image: InstalledImage) {
+        guard !isImageInUse(image) else { return }
+        let label = AppCatalog.androidVersionName(apiLevel: image.apiLevel)
+        let alert = NSAlert()
+        alert.messageText = "Remove the \(label) system image?"
+        alert.informativeText = "This frees \(humanBytes(image.sizeBytes)). You can download it again anytime by creating a phone on that version."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        log("Removing the \(label) system image…")
+        Task.detached(priority: .userInitiated) {
+            let ok = EmulatorManager.shared.removeSystemImage(image)
+            await MainActor.run {
+                self.log(ok ? "Removed the \(label) system image, freeing \(humanBytes(image.sizeBytes))."
+                            : "Couldn't remove the \(label) system image.")
+                self.refreshSystemImages()
+                self.refreshStorageStats()
+            }
+        }
+    }
+
     func refreshStorageStats() {
         Task.detached(priority: .background) {
             let home = NSHomeDirectory()
-            
+
             // 1. Get andross app size from its own bundle (wherever it lives)
             let appSize = EmulatorManager.shared.getDirectorySize(path: Bundle.main.bundlePath)
             
@@ -2436,6 +2484,21 @@ struct StorageAppView: View {
             }
             .onAppear { model.refreshStorageStats() }
 
+            SettingsCard(title: "Android versions") {
+                if model.systemImages.isEmpty {
+                    Text("No system images installed yet. Creating a phone downloads the version it needs.")
+                        .font(.footnote).foregroundStyle(Color.slateTextDim)
+                } else {
+                    Text("Each Android version keeps a multi-GB system image on your Mac. Remove any you're not using — creating a phone re-downloads it.")
+                        .font(.footnote).foregroundStyle(Color.slateTextDim)
+                    ForEach(model.systemImages) { image in
+                        Divider().background(Color.white.opacity(0.08))
+                        imageRow(image)
+                    }
+                }
+            }
+            .onAppear { model.refreshSystemImages() }
+
             SettingsCard(title: "Uninstall andross") {
                 Text("Choose what to remove from your Mac, then clean up. This can't be undone.")
                     .font(.footnote).foregroundStyle(Color.slateTextDim)
@@ -2478,6 +2541,39 @@ struct StorageAppView: View {
             Text(name).foregroundStyle(accent ? Color.androidGreen : Color.white.opacity(0.9))
             Spacer()
             Text(value.isEmpty ? "…" : value).foregroundStyle(.white)
+        }
+        .font(.callout)
+    }
+
+    @ViewBuilder
+    private func imageRow(_ image: InstalledImage) -> some View {
+        let inUse = model.isImageInUse(image)
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(AppCatalog.androidVersionName(apiLevel: image.apiLevel))
+                    .foregroundStyle(Color.white.opacity(0.9))
+                Text(humanBytes(image.sizeBytes))
+                    .font(.caption).foregroundStyle(Color.slateTextDim)
+            }
+            Spacer()
+            if inUse {
+                // An image a phone is built on can't be reclaimed — say so
+                // instead of offering a button that would refuse.
+                Text("In use")
+                    .font(.caption2).bold()
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Color.androidGreen.opacity(0.2))
+                    .foregroundStyle(Color.androidGreen)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+            } else {
+                Button(role: .destructive) {
+                    model.removeSystemImage(image)
+                } label: {
+                    Label("Remove", systemImage: "trash").font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .tint(.slateRed)
+            }
         }
         .font(.callout)
     }
