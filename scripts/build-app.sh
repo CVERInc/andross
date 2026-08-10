@@ -29,11 +29,6 @@ for bundle in ".build/$CONFIG"/*.bundle; do
   [ -e "$bundle" ] && cp -R "$bundle" "$DEST/Contents/Resources/"
 done
 
-if [ ! -f "$DEST/Contents/Resources/andross_AndrossCore.bundle/scrcpy-server" ]; then
-  echo "✗ scrcpy-server is missing from the app bundle — the embedded screen would be dead on arrival." >&2
-  exit 1
-fi
-
 cat > "$DEST/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -79,6 +74,17 @@ PLIST
 
 chmod +x "$DEST/Contents/MacOS/AndrossApp"
 xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
+
+# Ask the installed binary, from its install path, whether it can find and trust its own
+# scrcpy-server — the same lookup and the same checksum the embedded screen performs.
+#
+# The check this replaces asserted that a path of THIS SCRIPT's choosing existed. Such a check can
+# only confirm that the copy above landed where it aimed; it cannot notice the app looking
+# somewhere else, because the two paths have different authors and nothing reconciles them. The
+# lookup here is correct today (ScrcpyClient.serverSearchBases), which is exactly why the weaker
+# check never failed — and why it would not have failed if the lookup changed underneath it.
+echo "▸ verifying the app can load its resources from $DEST"
+"$DEST/Contents/MacOS/AndrossApp" --verify-resources
 
 echo "✓ Build complete! Application created at: $DEST"
 echo "  You can double-click it in Finder (first time: right-click → Open if macOS warns it's unsigned)."

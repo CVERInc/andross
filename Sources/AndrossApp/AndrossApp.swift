@@ -67,7 +67,19 @@ final class AndrossAppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// A launcher rather than `@main` on the App itself, so a question can be answered before SwiftUI
+// takes the process over: the build script asks the installed binary whether it can find its own
+// resources, and must get an exit code back, not a window (see ScrcpyClient.verifyResources).
 @main
+enum AndrossLauncher {
+    static func main() {
+        if CommandLine.arguments.contains("--verify-resources") {
+            exit(ScrcpyClient.verifyResources())
+        }
+        AndrossApp.main()
+    }
+}
+
 struct AndrossApp: App {
     @NSApplicationDelegateAdaptor(AndrossAppDelegate.self) var delegate
 

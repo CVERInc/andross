@@ -423,19 +423,50 @@ public final class ScrcpyClient: @unchecked Sendable {
     /// path. Looking for the file ourselves covers both layouts and, more to the
     /// point, returns nil instead of killing the app: a missing server is meant
     /// to degrade to a poster, not take the window down with it.
-    static func bundledServerURL() -> URL? {
+    static let serverName = "scrcpy-server"
+
+    /// The places the resource bundle may legitimately sit. Shared with `verifyResources()` so the
+    /// diagnostic can never list a different set of paths than the one actually searched.
+    static func serverSearchBases() -> [URL] {
         let bundleName = "andross_AndrossCore.bundle"
-        let candidates = [
+        return [
             Bundle.main.resourceURL?.appendingPathComponent(bundleName),  // .app/Contents/Resources
             Bundle.main.bundleURL.appendingPathComponent(bundleName),     // swift run, tests
             Bundle.main.resourceURL,                                      // resources copied in flat
         ].compactMap { $0 }
+    }
 
-        for base in candidates {
-            let jar = base.appendingPathComponent("scrcpy-server")
+    static func bundledServerURL() -> URL? {
+        for base in serverSearchBases() {
+            let jar = base.appendingPathComponent(serverName)
             if FileManager.default.fileExists(atPath: jar.path) { return jar }
         }
         return nil
+    }
+
+    /// `andross --verify-resources` — answers, from wherever the binary is installed, whether the
+    /// app can find and trust its own vendored server.
+    ///
+    /// This exists so the build script stops asserting a path of its own choosing. That check can
+    /// only ever confirm that the copy it just made landed where it aimed; it cannot notice that
+    /// the app looks somewhere else, because the two paths have different authors and nothing
+    /// reconciles them. (marktile's Mac host had exactly that gap: its build check was green for
+    /// months while the app was quietly reading its engine out of a developer's .build directory.)
+    /// Running the shipped binary's own lookup makes the check's subject the code.
+    public static func verifyResources() -> Int32 {
+        guard let url = bundledServerURL() else {
+            FileHandle.standardError.write(Data("✗ andross cannot find its vendored scrcpy-server. Tried:\n".utf8))
+            for base in serverSearchBases() {
+                FileHandle.standardError.write(Data("    \(base.appendingPathComponent(serverName).path)\n".utf8))
+            }
+            return 1
+        }
+        guard verifyBundledServerChecksum() else {
+            FileHandle.standardError.write(Data("✗ scrcpy-server found at \(url.path) but its checksum does not match.\n".utf8))
+            return 1
+        }
+        print("✓ scrcpy-server: \(url.path)")
+        return 0
     }
 
     private static func verifyBundledServerChecksum() -> Bool {
