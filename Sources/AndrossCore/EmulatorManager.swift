@@ -144,6 +144,20 @@ public final class EmulatorManager: Sendable {
         return nil
     }
 
+    /// Wait for the emulator booted from `avdName` to appear and finish
+    /// booting; returns its serial. Other running emulators are ignored.
+    public func waitForBootedAVD(named avdName: String, timeoutSeconds: Int = 240) -> String? {
+        let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
+        while Date() < deadline {
+            if let serial = AuroraSideload.serial(forAVD: avdName, in: runningAVDs()) {
+                let remaining = Int(deadline.timeIntervalSinceNow)
+                return waitForBoot(serial: serial, timeoutSeconds: max(remaining, 10)) ? serial : nil
+            }
+            Thread.sleep(forTimeInterval: 2)
+        }
+        return nil
+    }
+
     /// Run an adb command pinned to a specific device serial.
     @discardableResult
     func adb(_ serial: String, _ args: [String], stdin: String? = nil) -> Shell.Result {
@@ -320,11 +334,24 @@ public final class EmulatorManager: Sendable {
             onProgress("Downloading open-source Aurora Store APK...", false)
             let tmpDir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".andross_tmp")
             try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
-            let apkURL = tmpDir.appendingPathComponent("AuroraStore.apk")
+            let apkURL = AuroraSideload.pendingAPKURL(forAVD: name, in: tmpDir)
+            let partURL = apkURL.appendingPathExtension("part")
+            try? FileManager.default.createDirectory(at: apkURL.deletingLastPathComponent(),
+                                                     withIntermediateDirectories: true)
+            try? FileManager.default.removeItem(at: partURL)
 
-            let downloadCmd = ["curl", "-L", "-o", apkURL.path,
-                               "https://files.auroraoss.com/AuroraStore/Stable/AuroraStore-Stable.apk"]
-            if Shell.run(downloadCmd).ok {
+            // Only a download curl reports as successful AND that is really an
+            // APK becomes pending; anything else is discarded so no phone ever
+            // gets offered an error page.
+            let downloaded = Shell.run(AuroraSideload.downloadCommand(to: partURL)).ok
+                && AuroraSideload.looksLikeAPK((try? Data(contentsOf: partURL)) ?? Data())
+            if downloaded {
+                try? FileManager.default.removeItem(at: apkURL)
+                try? FileManager.default.moveItem(at: partURL, to: apkURL)
+            } else {
+                try? FileManager.default.removeItem(at: partURL)
+            }
+            if downloaded, FileManager.default.fileExists(atPath: apkURL.path) {
                 onProgress("Aurora Store APK downloaded. It will be automatically installed on first launch.", false)
             } else {
                 onProgress("Aurora Store download failed, but the virtual device was successfully created.", false)
@@ -394,12 +421,17 @@ public final class EmulatorManager: Sendable {
         }
         registerSpawned(process)
 
-        // If a pending Aurora Store APK exists, install it once the device boots.
+        // If an Aurora Store APK is pending for THIS AVD, install it once this
+        // AVD (not whichever emulator happens to boot first) has booted.
         let tmpDir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".andross_tmp")
-        let apkURL = tmpDir.appendingPathComponent("AuroraStore.apk")
+        let apkURL = AuroraSideload.pendingAPKURL(forAVD: name, in: tmpDir)
         if FileManager.default.fileExists(atPath: apkURL.path) {
+            guard AuroraSideload.looksLikeAPK((try? Data(contentsOf: apkURL)) ?? Data()) else {
+                try? FileManager.default.removeItem(at: apkURL)
+                return observation
+            }
             Task.detached { [self] in
-                guard let serial = waitForBootedEmulator() else { return }
+                guard let serial = waitForBootedAVD(named: name) else { return }
                 if adb(serial, ["install", apkURL.path]).ok {
                     try? FileManager.default.removeItem(at: apkURL)
                 }

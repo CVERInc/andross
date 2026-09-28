@@ -2,7 +2,8 @@ import Foundation
 import AndrossCore
 
 // Zero-dependency unit test runner (Command Line Tools ship neither XCTest
-// nor Swift Testing). Pure-parser coverage; exits non-zero on first failure.
+// nor Swift Testing). Pure-parser coverage; runs every check, then exits
+// non-zero if any failed.
 
 var failures = 0
 
@@ -560,6 +561,34 @@ let roundTrip = AndrossParse.nalUnitsToAVCC(AndrossParse.splitAnnexBNALUnits(con
 expectEqual(roundTrip, expectedAVCC, "Annex-B -> split -> AVCC round-trips to the same length-prefixed form")
 
 expectEqual(AndrossParse.h264NALUnitType([]), nil, "h264NALUnitType nil on an empty unit")
+
+// MARK: Aurora Store sideload
+
+let auroraTmp = URL(fileURLWithPath: "/tmp/andross-test")
+expect(AuroraSideload.pendingAPKURL(forAVD: "aurora-phone", in: auroraTmp)
+       != AuroraSideload.pendingAPKURL(forAVD: "play-phone", in: auroraTmp),
+       "Aurora pending APK is per-AVD, so another phone's boot cannot pick it up")
+expect(AuroraSideload.pendingAPKURL(forAVD: "aurora-phone", in: auroraTmp).path.hasPrefix(auroraTmp.path + "/"),
+       "Aurora pending APK stays under the andross tmp dir")
+expect(AuroraSideload.pendingAPKURL(forAVD: "../escape", in: auroraTmp).standardizedFileURL.path.hasPrefix(auroraTmp.path + "/"),
+       "Aurora pending APK path cannot escape the tmp dir via the AVD name")
+
+let auroraCurl = AuroraSideload.downloadCommand(to: auroraTmp.appendingPathComponent("x.apk"))
+expect(auroraCurl.contains("-f") || auroraCurl.contains("--fail") || auroraCurl.contains("-fL"),
+       "Aurora download fails on HTTP errors instead of saving the error page")
+
+let zipHeader = Data([0x50, 0x4B, 0x03, 0x04, 0x14, 0x00])
+expect(AuroraSideload.looksLikeAPK(zipHeader), "looksLikeAPK accepts a zip (APK) header")
+expect(!AuroraSideload.looksLikeAPK(Data("<html><body>404 Not Found</body></html>".utf8)),
+       "looksLikeAPK rejects an HTML error page")
+expect(!AuroraSideload.looksLikeAPK(Data()), "looksLikeAPK rejects an empty file")
+
+let runningPhones: [(serial: String, avdName: String)] = [("emulator-5554", "play-phone"),
+                                                           ("emulator-5556", "aurora-phone")]
+expectEqual(AuroraSideload.serial(forAVD: "aurora-phone", in: runningPhones), "emulator-5556",
+            "Aurora installs onto the serial booted from its own AVD, not the first one")
+expectEqual(AuroraSideload.serial(forAVD: "aurora-phone", in: [("emulator-5554", "play-phone")]), nil,
+            "Aurora install waits when only other phones are running")
 
 // MARK: result
 

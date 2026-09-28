@@ -5,3 +5,6 @@
 
 # Local session plan docs — do not publish
 PLAN-*.md
+
+# release-sign.sh output (signed/notarized zips) — never commit
+dist/
