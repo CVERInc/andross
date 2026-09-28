@@ -73,7 +73,8 @@ launch macOS may warn it is unsigned — right-click → Open.
 ./scripts/make-icon.sh         # regenerate the app icon (assets/andross.icns)
 ```
 
-CI runs `./scripts/test.sh` on every push and pull request.
+CI runs `./scripts/test.sh` on every push and pull request, then packages the
+app with `./scripts/build-app.sh` and runs its `--verify-resources` self-check.
 
 ### Reproducible build on a fresh Apple-silicon Mac
 

@@ -21,3 +21,10 @@ jobs:
       # AVD and needs the Android SDK + an existing virtual device.
       - name: Build and unit test
         run: ./scripts/test.sh
+
+      # Package the .app exactly as a release does and have the installed
+      # binary check its own resources (--verify-resources). test.sh never
+      # copies the SwiftPM resource bundle, so without this step a broken
+      # bundle copy (no scrcpy-server in the .app) would still leave CI green.
+      - name: Package app and verify its resources
+        run: ./scripts/build-app.sh release "$RUNNER_TEMP/andross.app"
