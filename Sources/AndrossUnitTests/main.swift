@@ -2,7 +2,8 @@ import Foundation
 import AndrossCore
 
 // Zero-dependency unit test runner (Command Line Tools ship neither XCTest
-// nor Swift Testing). Pure-parser coverage; exits non-zero on first failure.
+// nor Swift Testing). Pure-parser coverage; runs every check, then exits
+// non-zero if any failed.
 
 var failures = 0
 
