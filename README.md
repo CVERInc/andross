@@ -9,11 +9,12 @@ one account to one device (LINE, messengers, games…), or to safely try out
 and drives Google's official emulator engine directly through
 `Hypervisor.framework`.
 
-> **Status: v0.1.0 — early, GUI-only.** The app builds and runs; core flows
-> (create device, sandboxes, install/launch apps, clean uninstall) are
-> exercised by an integration test. The in-window phone screen streams over
-> scrcpy — hardware H.264, live touch, ~60fps on an Apple-silicon host. Audio
-> is not carried yet. Not yet signed/notarized for distribution.
+> **Status: v0.1.0 — early, GUI-only.** The app builds and runs; the
+> identity lifecycle on an existing virtual phone (boot, sandboxes, install,
+> clone, storage stats, uninstall an app) is exercised by an integration test.
+> The in-window phone screen streams over scrcpy — hardware H.264, live touch,
+> ~60fps on an Apple-silicon host — and the phone's audio streams with it
+> (with a mute switch). Not yet signed/notarized for distribution.
 
 ---
 
@@ -49,12 +50,16 @@ launch macOS may warn it is unsigned — right-click → Open.
 
 * **Home** — shows the apps installed for the current identity; click one to
   open it on the virtual phone. Drop an `.apk` anywhere in the window to install.
-* **Devices** (dock) — create your first virtual phone (it checks for and guides
+* **Phones** (dock) — create your first virtual phone (it checks for and guides
   you through installing Java and the Android engine), then start or delete it.
-* **Sandboxes** (dock) — create, switch, and delete isolated identities, and add
-  installed apps to a new identity in one click.
-* **Settings** (dock) — system status, disk usage, recent activity, shut down
-  all phones, and a clean-uninstall wizard (including the Homebrew components).
+  While a phone runs, its sandboxes live here too: create, switch, and delete
+  isolated identities, and add installed apps to a new identity in one click.
+* **Storage** (dock) — disk usage on this Mac, installed Android versions (remove
+  the ones you don't use), and a clean-uninstall wizard (including the Homebrew
+  components).
+* **System** (dock) — engine status (Java, Android engine, Homebrew) and recent
+  activity.
+* **Settings** (dock) — window preferences and **Shut Down Phone**.
 
 ---
 
