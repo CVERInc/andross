@@ -320,11 +320,9 @@ public final class EmulatorManager: Sendable {
             onProgress("Downloading open-source Aurora Store APK...", false)
             let tmpDir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".andross_tmp")
             try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
-            let apkURL = tmpDir.appendingPathComponent("AuroraStore.apk")
+            let apkURL = AuroraSideload.pendingAPKURL(forAVD: name, in: tmpDir)
 
-            let downloadCmd = ["curl", "-L", "-o", apkURL.path,
-                               "https://files.auroraoss.com/AuroraStore/Stable/AuroraStore-Stable.apk"]
-            if Shell.run(downloadCmd).ok {
+            if Shell.run(AuroraSideload.downloadCommand(to: apkURL)).ok {
                 onProgress("Aurora Store APK downloaded. It will be automatically installed on first launch.", false)
             } else {
                 onProgress("Aurora Store download failed, but the virtual device was successfully created.", false)
@@ -396,7 +394,7 @@ public final class EmulatorManager: Sendable {
 
         // If a pending Aurora Store APK exists, install it once the device boots.
         let tmpDir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".andross_tmp")
-        let apkURL = tmpDir.appendingPathComponent("AuroraStore.apk")
+        let apkURL = AuroraSideload.pendingAPKURL(forAVD: name, in: tmpDir)
         if FileManager.default.fileExists(atPath: apkURL.path) {
             Task.detached { [self] in
                 guard let serial = waitForBootedEmulator() else { return }
